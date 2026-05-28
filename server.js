@@ -7,25 +7,113 @@ const path = require("path");
 dotenv.config();
 const app = express();
 
-// Middleware
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ MIDDLEWARE - ORDER MATTERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 1️⃣ Body Parser FIRST (before routes)
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// 2️⃣ CORS
 app.use(cors());
-app.use(express.json());
+
+// 3️⃣ Static Files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// Routes
+// 4️⃣ Request Logging (Optional - for debugging)
+app.use((req, res, next) => {
+  if (req.path === "/webhook" || req.path === "/webhook/flow") {
+    console.log(`\n📨 ${req.method} ${req.path}`);
+    console.log(`   Headers:`, req.headers["content-type"]);
+    if (req.method === "POST") {
+      console.log(`   Body Keys:`, Object.keys(req.body || {}).join(", "));
+    }
+  }
+  next();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📦 ROUTES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// API Routes
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/companies", require("./routes/companyRoutes"));
 app.use("/api/projects", require("./routes/projectRoutes"));
 app.use("/api/bills", require("./routes/billRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/users", require("./routes/userRoutes"));
+
+// ⭐ WhatsApp Routes (mounted at /webhook)
 app.use("/webhook", require("./routes/whatsappRoutes"));
 
-// MongoDB Connect
+// Health Check
+app.get("/health", (req, res) => {
+  res.json({ status: "✅ Server is running" });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 💾 MONGODB CONNECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/profitdesk";
+
 mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("❌ MongoDB Error:", err));
+  .connect(MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => {
+    console.log("✅ MongoDB Connected");
+    console.log(`   URI: ${MONGO_URI.split("@")[1] || MONGO_URI}`);
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB Connection Error:", err.message);
+    process.exit(1);
+  });
+
+// Handle MongoDB connection events
+mongoose.connection.on("disconnected", () => {
+  console.warn("⚠️ MongoDB disconnected");
+});
+
+mongoose.connection.on("error", (err) => {
+  console.error("❌ MongoDB error:", err.message);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🚀 SERVER START
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+app.listen(PORT, () => {
+  console.log("\n" + "═".repeat(80));
+  console.log("🚀 ProfitDesk Server Started");
+  console.log("═".repeat(80));
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`🔗 Health Check: http://localhost:${PORT}/health`);
+  console.log(`📲 WhatsApp Webhook: http://localhost:${PORT}/webhook`);
+  console.log(`🔄 Flow Endpoint: http://localhost:${PORT}/webhook/flow`);
+  console.log("\n⚙️  Environment Variables Loaded:");
+  console.log(`   MONGO_URI: ${MONGO_URI ? "✅" : "❌"}`);
+  console.log(
+    `   WHATSAPP_PHONE_NUMBER_ID: ${process.env.WHATSAPP_PHONE_NUMBER_ID ? "✅" : "❌"}`
+  );
+  console.log(
+    `   WHATSAPP_ACCESS_TOKEN: ${process.env.WHATSAPP_ACCESS_TOKEN ? "✅" : "❌"}`
+  );
+  console.log(`   WHATSAPP_VERIFY_TOKEN: ${process.env.WHATSAPP_VERIFY_TOKEN ? "✅" : "❌"}`);
+  console.log(`   FLOW_ID: ${process.env.FLOW_ID ? "✅" : "❌"}`);
+  console.log("═".repeat(80) + "\n");
+});
+
+// Graceful Shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, closing server gracefully...");
+  mongoose.connection.close();
+  process.exit(0);
+});
+
+module.exports = app;
