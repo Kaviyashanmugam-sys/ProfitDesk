@@ -1,6 +1,20 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- * ProfitDesk WhatsApp Bot + Flow Handler [MULTI-FILE SUPPORT]
+ * ProfitDesk — WhatsApp Bot + Flow Handler
+ *
+ * Flow:  any msg → WELCOME (greeting + Create Bill button)
+ *                → BILL_FORM (project, category, amount, vendor, remarks)
+ *                → ADD_PHOTOS (camera/gallery, max 5)
+ *                → ADD_DOCUMENTS (PDF/Excel/Word, max 5)
+ *                → REVIEW (confirm / cancel)
+ *                → SUCCESS
+ *
+ * Registered Users (loaded from DB):
+ *   Kaviya      — +917904307757
+ *   Sasi Kumar  — +917708420110
+ *   Abinaya     — +919715558350
+ *
+ * Unregistered numbers → "not registered" message, no flow opened
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
@@ -17,28 +31,28 @@ const User    = require("../models/User");
 // 🔑 CONFIG
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const VERIFY_TOKEN     = process.env.WHATSAPP_VERIFY_TOKEN || "profitdesk_verify_token";
+const VERIFY_TOKEN     = process.env.WHATSAPP_VERIFY_TOKEN    || "profitdesk_verify_token";
 const PHONE_NUMBER_ID  = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN     = process.env.WHATSAPP_ACCESS_TOKEN;
 const FLOW_ID          = process.env.FLOW_ID;
 const FLOW_PRIVATE_KEY = process.env.FLOW_PRIVATE_KEY;
 const GRAPH_URL        = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}`;
 
-console.log("\n📱 ProfitDesk Bot Started");
-console.log(`   PHONE_NUMBER_ID:  ${PHONE_NUMBER_ID  ? "✅" : "❌"}`);
-console.log(`   ACCESS_TOKEN:     ${ACCESS_TOKEN     ? "✅" : "❌"}`);
-console.log(`   FLOW_ID:          ${FLOW_ID          || "❌"}`);
-console.log(`   FLOW_PRIVATE_KEY: ${FLOW_PRIVATE_KEY ? "✅" : "❌"}\n`);
+console.log("\n📱 ProfitDesk WhatsApp Bot Started");
+console.log(`   PHONE_NUMBER_ID:  ${PHONE_NUMBER_ID  ? "✅" : "❌ MISSING"}`);
+console.log(`   ACCESS_TOKEN:     ${ACCESS_TOKEN     ? "✅" : "❌ MISSING"}`);
+console.log(`   FLOW_ID:          ${FLOW_ID          || "❌ MISSING"}`);
+console.log(`   FLOW_PRIVATE_KEY: ${FLOW_PRIVATE_KEY ? "✅" : "❌ MISSING"}\n`);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 📝 CATEGORY MAPPING (Flow UI → Bill Model Enum)
+// 📝 CATEGORY MAP  (Flow radio id → Bill model enum)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const CATEGORY_MAP = {
-  "Material":    "Material",
-  "Manpower":    "Labour",
-  "Equipment":   "Machineries",
-  "Others":      "Others",
+  Material:  "Material",
+  Manpower:  "Labour",
+  Equipment: "Machineries",
+  Others:    "Others",
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -47,11 +61,11 @@ const CATEGORY_MAP = {
 
 function toE164Indian(phone) {
   if (!phone) return null;
-  const digits = String(phone).replace(/\D/g, "");
-  if (digits.length === 10)                              return `+91${digits}`;
-  if (digits.length === 12 && digits.startsWith("91"))  return `+${digits}`;
-  if (digits.length === 13 && digits.startsWith("910")) return `+91${digits.slice(3)}`;
-  return `+${digits}`;
+  const d = String(phone).replace(/\D/g, "");
+  if (d.length === 10)                         return `+91${d}`;
+  if (d.length === 12 && d.startsWith("91"))  return `+${d}`;
+  if (d.length === 13 && d.startsWith("910")) return `+91${d.slice(3)}`;
+  return `+${d}`;
 }
 
 function last10(phone) {
@@ -59,7 +73,7 @@ function last10(phone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 💾 SESSION STORE
+// 💾 IN-MEMORY SESSION STORE
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const sessions = {};
@@ -70,13 +84,14 @@ function getSession(from) {
       user:     null,
       projects: [],
       bill: {
-        project_id:   null,
-        project_name: null,
-        bill_type:    null,
-        photo_attachments: [],      // ← Added: photos/images
-        document_attachments: [],   // ← Added: PDFs, Excel, Word, etc.
-        bill_amount:  null,
-        remarks:      "",
+        project_id:           null,
+        project_name:         null,
+        bill_type:            null,
+        bill_amount:          null,
+        vendor_name:          "",
+        remarks:              "",
+        photo_attachments:    [],
+        document_attachments: [],
       },
     };
   }
@@ -88,14 +103,13 @@ function clearSession(from) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🔐 ENCRYPTION / DECRYPTION
+// 🔐 FLOW ENCRYPTION / DECRYPTION
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function decryptFlowRequest(body) {
   try {
     const encryptedAesKey = Buffer.from(body.encrypted_aes_key, "base64");
     const privateKeyObj   = crypto.createPrivateKey(FLOW_PRIVATE_KEY);
-
     const decryptedAesKey = crypto.privateDecrypt(
       {
         key:      privateKeyObj,
@@ -113,17 +127,9 @@ function decryptFlowRequest(body) {
 
     const decipher = crypto.createDecipheriv("aes-128-gcm", decryptedAesKey, iv);
     decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
-    const decrypted = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]);
-
-    return {
-      parsed: JSON.parse(decrypted.toString("utf8")),
-      aesKey: decryptedAesKey,
-      iv,
-    };
+    return { parsed: JSON.parse(decrypted.toString("utf8")), aesKey: decryptedAesKey, iv };
   } catch (err) {
     console.error("❌ Decryption error:", err.message);
     return null;
@@ -145,68 +151,56 @@ function encryptFlowResponse(responseObj, aesKey, iv) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function findUserByPhone(whatsappNumber) {
-  const raw    = String(whatsappNumber).replace(/\D/g, "");
-  const tail10 = raw.slice(-10);
+  const tail10     = String(whatsappNumber).replace(/\D/g, "").slice(-10);
+  const candidates = [`+91${tail10}`, `91${tail10}`, tail10, `0${tail10}`];
 
-  console.log(`🔍 Looking up user | WA#: ${whatsappNumber} | Last-10: ${tail10}`);
-
-  const candidates = [
-    `+91${tail10}`,
-    `91${tail10}`,
-    tail10,
-    `0${tail10}`,
-  ];
-
-  const user = await User.findOne(
+  // Fast indexed lookup first
+  let user = await User.findOne(
     { mobile: { $in: candidates }, isActive: true },
     null,
     { lean: false }
   ).populate("companies");
 
   if (user) {
-    console.log(`✅ User found (indexed): "${user.name}" | Stored: ${user.mobile}`);
+    console.log(`✅ User found: "${user.name}" (${user.mobile})`);
     return user;
   }
 
-  console.log(`⚠️  Indexed lookup missed — trying last-10 full-scan…`);
-
-  const allUsers = await User.find({ isActive: true }).populate("companies");
-  const matched  = allUsers.find((u) => last10(u.mobile) === tail10);
+  // Fallback: full collection scan (handles odd formats)
+  const all     = await User.find({ isActive: true }).populate("companies");
+  const matched = all.find((u) => last10(u.mobile) === tail10);
 
   if (matched) {
-    console.log(`✅ User found (scan): "${matched.name}" | Stored: ${matched.mobile}`);
-    try {
-      await User.updateOne(
-        { _id: matched._id },
-        { $set: { mobile: toE164Indian(matched.mobile) } }
-      );
-      console.log(`🔧 Auto-normalized → ${toE164Indian(matched.mobile)}`);
-    } catch (healErr) {
-      console.warn("⚠️  Auto-heal failed:", healErr.message);
-    }
+    console.log(`✅ User found (scan): "${matched.name}" — normalising mobile`);
+    // Auto-heal to E164 in background
+    User.updateOne(
+      { _id: matched._id },
+      { $set: { mobile: toE164Indian(matched.mobile) } }
+    ).catch((e) => console.warn("⚠️  Auto-heal failed:", e.message));
     return matched;
   }
 
-  console.warn(`❌ No user found for: ${whatsappNumber}`);
+  console.warn(`❌ No user found for: ${whatsappNumber} (tail: ${tail10})`);
   return null;
 }
 
 async function loadProjects(user) {
-  const projects = await Project.find({
-    company:  { $in: user.companies.map((c) => c._id) },
+  const companyIds = user.companies.map((c) => c._id);
+  const rows = await Project.find({
+    company:  { $in: companyIds },
     isActive: true,
   })
     .populate("company")
     .lean();
 
-  return projects.map((p) => ({
+  return rows.map((p) => ({
     id:    p._id.toString(),
-    title: `${p.name}${p.location ? ` — ${p.location}` : ""}`,
+    title: p.name + (p.location ? ` — ${p.location}` : ""),
   }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 📤 SEND HELPERS
+// 📤 WHATSAPP SEND HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function sendText(to, text) {
@@ -221,6 +215,7 @@ async function sendText(to, text) {
       },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
+    console.log(`📤 Text sent to ${to}`);
   } catch (err) {
     console.error("❌ sendText error:", err.response?.data || err.message);
   }
@@ -237,246 +232,314 @@ async function sendFlowMessage(to, userName) {
         interactive: {
           type: "flow",
           body: {
-            text: `Hello *${userName}* 👋\nTap below to open ProfitDesk and create a bill.`,
+            // This text appears in the WhatsApp chat BEFORE the flow opens
+            text: `Hello *${userName}* 👋\nWelcome to *ProfitDesk*!\nTap below to create a new bill.`,
           },
           action: {
-            name:       "flow",
+            name: "flow",
             parameters: {
               flow_message_version: "3",
               flow_id:              FLOW_ID,
-              flow_cta:             "Open ProfitDesk",
-              flow_token:           to,
+              flow_cta:             "📋 Create Bill",
+              flow_token:           to,   // used as identifier in flow handler
+              // Flow opens on WELCOME screen — INIT action fires automatically
             },
           },
         },
       },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
-    console.log(`✅ Flow message sent to ${to}`);
+    console.log(`✅ Flow message sent to ${to} (${userName})`);
   } catch (err) {
-    console.error("❌ sendFlow error:", err.response?.data || err.message);
+    console.error("❌ sendFlowMessage error:", err.response?.data || err.message);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🤖 INCOMING MESSAGE HANDLER
+//
+//  Logic:
+//    1. Any message type arrives
+//    2. Look up sender in DB
+//    3. If NOT found  → send "not registered" text, stop
+//    4. If found      → pre-load session → send Flow (opens on WELCOME screen)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function handleIncomingMessage(from, message) {
-  console.log(`\n📨 Message from ${from} | Type: ${message.type}`);
+  console.log(`\n📨 Incoming | From: ${from} | Type: ${message.type}`);
 
-  if (message.type !== "text") return;
-
-  const user = await findUserByPhone(from);
-
-  if (!user) {
-    await sendText(
-      from,
-      "❌ Your number is not registered in ProfitDesk.\nPlease contact your admin."
-    );
+  // ── Only handle text messages (ignore image / audio / sticker / etc.) ──────
+  if (message.type !== "text") {
+    console.log(`   Ignored non-text message type: ${message.type}`);
     return;
   }
 
+  // ── Look up user in DB ──────────────────────────────────────────────────────
+  const user = await findUserByPhone(from);
+
+  if (!user) {
+    // Unregistered number → inform and stop
+    await sendText(
+      from,
+      "❌ Your number is not registered in ProfitDesk.\n\nPlease contact your admin to get access."
+    );
+    console.log(`🚫 Unregistered number blocked: ${from}`);
+    return;
+  }
+
+  // ── Registered user → pre-load session so WELCOME/INIT is instant ──────────
   const session    = getSession(from);
   session.user     = user;
   session.projects = await loadProjects(user);
 
+  console.log(`✅ Registered user: ${user.name} | Projects loaded: ${session.projects.length}`);
+
+  // ── Send Flow — opens on WELCOME screen, INIT fires automatically ───────────
   await sendFlowMessage(from, user.name);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🔄 FLOW SCREEN HANDLERS
+// 🔄 FLOW ACTION HANDLER
+//
+//  Screen flow:
+//    INIT        → WELCOME
+//    WELCOME     → BILL_FORM     (data_exchange: action=go_to_bill_form)
+//    BILL_FORM   → ADD_PHOTOS    (data_exchange: project, category, amount...)
+//    ADD_PHOTOS  → ADD_DOCUMENTS (data_exchange: photo_attachments)
+//    ADD_DOCUMENTS → REVIEW      (data_exchange: document_attachments)
+//    REVIEW      → SUCCESS       (data_exchange: confirmation=confirm)
+//                → BILL_FORM     (data_exchange: confirmation=cancel)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function handleFlowAction(from, action, screen, data, session) {
-  console.log(`🔄 Screen: ${screen} | Action: ${action}`);
+  console.log(`🔄 Flow | From: ${from} | Screen: ${screen} | Action: ${action}`);
 
-  // ── INIT ────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────────
+  // INIT — Flow opened, show WELCOME screen
+  // ────────────────────────────────────────────────────────────────────────────
   if (action === "INIT") {
-    if (!session.user) {
-      session.user = await findUserByPhone(from);
-      if (session.user) {
-        session.projects = await loadProjects(session.user);
-      }
-    }
-    return {
-      version: "3.0",
-      screen:  "WELCOME",
-      data: { user_name: session.user?.name || "there" },
-    };
-  }
+    // Re-fetch in case server restarted and session is empty
+    let user     = session.user;
+    let projects = session.projects;
 
-  // ── DATA EXCHANGE ────────────────────────────────────────────────────────────
-  if (action === "data_exchange") {
-
-    // ── WELCOME ──────────────────────────────────────────────────────────────
-    if (screen === "WELCOME") {
-      if (!session.projects?.length) {
-        session.projects = await loadProjects(session.user);
-      }
-      if (!session.projects.length) {
+    if (!user) {
+      user = await findUserByPhone(from);
+      if (!user) {
+        // Fallback — should not happen (handleIncomingMessage blocks unregistered)
         return {
           version: "3.0",
           screen:  "WELCOME",
-          data: { user_name: session.user?.name || "there" },
+          data:    { user_name: "there" },
         };
       }
-      return {
-        version: "3.0",
-        screen:  "PROJECT_SELECTION",
-        data: { projects: session.projects, error_message: "" },
-      };
+      projects         = await loadProjects(user);
+      session.user     = user;
+      session.projects = projects;
     }
 
-    // ── PROJECT_SELECTION ────────────────────────────────────────────────────
-    if (screen === "PROJECT_SELECTION") {
-      const projectId = data?.selected_project;
-      if (!projectId) {
-        return {
-          version: "3.0",
-          screen:  "PROJECT_SELECTION",
-          data: { projects: session.projects, error_message: "Please select a project." },
-        };
+    console.log(`✅ INIT — user: ${user.name} | projects: ${projects.length}`);
+
+    return {
+      version: "3.0",
+      screen:  "WELCOME",
+      data:    { user_name: user.name },
+    };
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // DATA EXCHANGE
+  // ────────────────────────────────────────────────────────────────────────────
+  if (action === "data_exchange") {
+
+    // ── WELCOME → BILL_FORM ───────────────────────────────────────────────────
+    if (screen === "WELCOME") {
+      // User tapped "Create Bill" on welcome screen
+      // Ensure projects are loaded (edge case: session cleared mid-flow)
+      if (!session.projects || session.projects.length === 0) {
+        const user = session.user || (await findUserByPhone(from));
+        if (user) {
+          session.user     = user;
+          session.projects = await loadProjects(user);
+        }
       }
-      const project             = session.projects.find((p) => p.id === projectId);
-      session.bill.project_id   = projectId;
-      session.bill.project_name = project?.title || projectId;
-      return {
-        version: "3.0",
-        screen:  "BILL_TYPE",
-        data: { error_message: "" },
-      };
-    }
 
-    // ── BILL_TYPE ────────────────────────────────────────────────────────────
-    if (screen === "BILL_TYPE") {
-      const billType = data?.bill_type;
-      const valid    = ["Material", "Manpower", "Equipment", "Others"];
-      
-      if (!billType || !valid.includes(billType)) {
-        return {
-          version: "3.0",
-          screen:  "BILL_TYPE",
-          data: { error_message: "Please select a bill type." },
-        };
-      }
-      
-      session.bill.bill_type = CATEGORY_MAP[billType];
-      console.log(`📝 Mapped: "${billType}" → "${session.bill.bill_type}"`);
-      
-      return {
-        version: "3.0",
-        screen:  "ADD_ATTACHMENT",
-        data: { error_message: "" },
-      };
-    }
+      console.log(`➡️  WELCOME → BILL_FORM | Projects: ${session.projects?.length || 0}`);
 
-    // ── ADD_PHOTOS ────────────────────────────────────────────────────────────
-    // ✅ UPDATED: First attachment screen for photos only
-    if (screen === "ADD_PHOTOS") {
-      const photoAttachments = data?.photo_attachments || [];
-      session.bill.photo_attachments = Array.isArray(photoAttachments) ? photoAttachments : [];
-      
-      console.log(`📸 Photos uploaded: ${session.bill.photo_attachments.length}`);
-      
       return {
         version: "3.0",
-        screen:  "ADD_DOCUMENTS",
-        data: { error_message: "" },
-      };
-    }
-
-    // ── ADD_DOCUMENTS ──────────────────────────────────────────────────────────
-    // ✅ UPDATED: Second attachment screen for documents
-    if (screen === "ADD_DOCUMENTS") {
-      const docAttachments = data?.document_attachments || [];
-      session.bill.document_attachments = Array.isArray(docAttachments) ? docAttachments : [];
-      
-      const totalFiles = session.bill.photo_attachments.length + session.bill.document_attachments.length;
-      console.log(`📄 Documents uploaded: ${session.bill.document_attachments.length} | Total: ${totalFiles}`);
-      
-      return {
-        version: "3.0",
-        screen:  "ENTER_AMOUNT",
-        data: { error_message: "" },
-      };
-    }
-
-    // ── ENTER_AMOUNT ─────────────────────────────────────────────────────────
-    if (screen === "ENTER_AMOUNT") {
-      const amount = parseFloat(String(data?.bill_amount || "").replace(/,/g, ""));
-      if (isNaN(amount) || amount <= 0) {
-        return {
-          version: "3.0",
-          screen:  "ENTER_AMOUNT",
-          data: { error_message: "Please enter a valid amount." },
-        };
-      }
-      session.bill.bill_amount = amount;
-      session.bill.remarks     = data?.remarks?.trim() || "";
-      
-      const totalFiles = session.bill.photo_attachments.length + session.bill.document_attachments.length;
-      const attachmentText = totalFiles === 0 ? "No files" : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
-      
-      return {
-        version: "3.0",
-        screen:  "REVIEW",
+        screen:  "BILL_FORM",
         data: {
-          user_name:     session.user?.name    || "—",
-          project_name:  session.bill.project_name,
-          bill_type:     session.bill.bill_type,
-          bill_amount:   amount.toLocaleString("en-IN"),
-          attachments_count: attachmentText,
-          remarks:       session.bill.remarks  || "None",
-          error_message: "",
+          user_name:      session.user?.name || "there",
+          projects:       session.projects   || [],
+          project_error:  "",
+          category_error: "",
+          amount_error:   "",
         },
       };
     }
 
-    // ── REVIEW ───────────────────────────────────────────────────────────────
+    // ── BILL_FORM → ADD_PHOTOS ────────────────────────────────────────────────
+    if (screen === "BILL_FORM") {
+      const projectId = data?.selected_project;
+      const billType  = data?.bill_type;
+      const amount    = parseFloat(String(data?.bill_amount || "").replace(/,/g, ""));
+
+      // Validate
+      const projectError  = !projectId                            ? "Please select a project."    : "";
+      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."   : "";
+      const amountError   = isNaN(amount) || amount <= 0         ? "Please enter a valid amount." : "";
+
+      if (projectError || categoryError || amountError) {
+        return {
+          version: "3.0",
+          screen:  "BILL_FORM",
+          data: {
+            user_name:      session.user?.name || "there",
+            projects:       session.projects   || [],
+            project_error:  projectError,
+            category_error: categoryError,
+            amount_error:   amountError,
+          },
+        };
+      }
+
+      // Save bill form data to session
+      const project = session.projects.find((p) => p.id === projectId);
+      session.bill.project_id   = projectId;
+      session.bill.project_name = project?.title || projectId;
+      session.bill.bill_type    = CATEGORY_MAP[billType];
+      session.bill.bill_amount  = amount;
+      session.bill.vendor_name  = data?.vendor_name?.trim() || "";
+      session.bill.remarks      = data?.remarks?.trim()     || "";
+
+      console.log(
+        `📝 Bill form saved | Project: ${session.bill.project_name}` +
+        ` | Type: ${session.bill.bill_type} | ₹${amount}`
+      );
+
+      return {
+        version: "3.0",
+        screen:  "ADD_PHOTOS",
+        data:    { error_message: "" },
+      };
+    }
+
+    // ── ADD_PHOTOS → ADD_DOCUMENTS ────────────────────────────────────────────
+    if (screen === "ADD_PHOTOS") {
+      const photos = data?.photo_attachments || [];
+      session.bill.photo_attachments = Array.isArray(photos) ? photos : [];
+
+      console.log(`📸 Photos saved: ${session.bill.photo_attachments.length}`);
+
+      return {
+        version: "3.0",
+        screen:  "ADD_DOCUMENTS",
+        data:    { error_message: "" },
+      };
+    }
+
+    // ── ADD_DOCUMENTS → REVIEW ────────────────────────────────────────────────
+    if (screen === "ADD_DOCUMENTS") {
+      const docs = data?.document_attachments || [];
+      session.bill.document_attachments = Array.isArray(docs) ? docs : [];
+
+      const totalFiles =
+        session.bill.photo_attachments.length +
+        session.bill.document_attachments.length;
+
+      console.log(
+        `📄 Docs saved: ${session.bill.document_attachments.length}` +
+        ` | Total files: ${totalFiles}`
+      );
+
+      const attachmentText =
+        totalFiles === 0
+          ? "No files"
+          : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
+
+      return {
+        version: "3.0",
+        screen:  "REVIEW",
+        data: {
+          user_name:         session.user?.name                          || "—",
+          project_name:      session.bill.project_name                   || "—",
+          bill_type:         session.bill.bill_type                      || "—",
+          bill_amount:       session.bill.bill_amount.toLocaleString("en-IN"),
+          vendor_name:       session.bill.vendor_name                    || "Not specified",
+          attachments_count: attachmentText,
+          remarks:           session.bill.remarks                        || "None",
+          error_message:     "",
+        },
+      };
+    }
+
+    // ── REVIEW → SUCCESS or back to BILL_FORM ────────────────────────────────
     if (screen === "REVIEW") {
       const confirmation = data?.confirmation;
-      
-      const totalFiles = session.bill.photo_attachments.length + session.bill.document_attachments.length;
-      const attachmentText = totalFiles === 0 ? "No files" : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
 
+      const allFiles   = [
+        ...session.bill.photo_attachments,
+        ...session.bill.document_attachments,
+      ];
+      const totalFiles = allFiles.length;
+      const attachText =
+        totalFiles === 0
+          ? "No files"
+          : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
+
+      // ── No selection made ───────────────────────────────────────────────────
       if (!confirmation) {
         return {
           version: "3.0",
           screen:  "REVIEW",
           data: {
-            user_name:     session.user?.name    || "—",
-            project_name:  session.bill.project_name,
-            bill_type:     session.bill.bill_type,
-            bill_amount:   session.bill.bill_amount.toLocaleString("en-IN"),
-            attachments_count: attachmentText,
-            remarks:       session.bill.remarks  || "None",
-            error_message: "Please confirm or cancel.",
+            user_name:         session.user?.name                              || "—",
+            project_name:      session.bill.project_name                       || "—",
+            bill_type:         session.bill.bill_type                          || "—",
+            bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
+            vendor_name:       session.bill.vendor_name                        || "Not specified",
+            attachments_count: attachText,
+            remarks:           session.bill.remarks                            || "None",
+            error_message:     "Please confirm or cancel to proceed.",
           },
         };
       }
 
+      // ── CANCEL ──────────────────────────────────────────────────────────────
       if (confirmation === "cancel") {
         const userName = session.user?.name || "there";
         clearSession(from);
+
+        // Notify in WhatsApp chat
+        sendText(
+          from,
+          "🚫 Bill cancelled. No entry was saved.\n\n_Send any message to create a new bill._"
+        ).catch((e) => console.error("❌ sendText (cancel):", e.message));
+
+        // Return to BILL_FORM (fresh)
         return {
           version: "3.0",
-          screen:  "WELCOME",
-          data: { user_name: userName },
+          screen:  "BILL_FORM",
+          data: {
+            user_name:      userName,
+            projects:       [],          // empty — user will need to restart
+            project_error:  "",
+            category_error: "",
+            amount_error:   "",
+          },
         };
       }
 
+      // ── CONFIRM → Save Bill to DB ───────────────────────────────────────────
       if (confirmation === "confirm") {
         try {
+          // Generate sequential Bill ID: B/MM/YYYY-00001
           const billCount = await Bill.countDocuments({});
           const now       = new Date();
-          const billId    = `B/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}-${String(billCount + 1).padStart(5, "0")}`;
-
-          // ✅ Merge all attachments
-          const allAttachments = [
-            ...session.bill.photo_attachments,
-            ...session.bill.document_attachments
-          ];
+          const mm        = String(now.getMonth() + 1).padStart(2, "0");
+          const yyyy      = now.getFullYear();
+          const seq       = String(billCount + 1).padStart(5, "0");
+          const billId    = `B/${mm}/${yyyy}-${seq}`;
 
           const newBill = new Bill({
             billId,
@@ -486,62 +549,70 @@ async function handleFlowAction(from, action, screen, data, session) {
             engineer:    session.user._id,
             category:    session.bill.bill_type,
             amount:      session.bill.bill_amount,
+            vendorName:  session.bill.vendor_name,
             remarks:     session.bill.remarks,
             status:      "In Progress",
-            attachments: allAttachments,
+            attachments: allFiles,
           });
 
           await newBill.save();
-          console.log(`✅ Bill saved: ${billId} | Category: ${session.bill.bill_type} | Files: ${allAttachments.length}`);
 
-          const formattedAmount = session.bill.bill_amount.toLocaleString("en-IN");
-          const projectName     = session.bill.project_name;
-          const billType        = session.bill.bill_type;
-          const fileCount       = allAttachments.length;
+          const fmt         = session.bill.bill_amount.toLocaleString("en-IN");
+          const projectName = session.bill.project_name;
+          const billType    = session.bill.bill_type;
+          const vendor      = session.bill.vendor_name || "—";
+          const fileCount   = allFiles.length;
 
+          console.log(`✅ Bill saved: ${billId} | ${billType} | ₹${fmt} | Files: ${fileCount}`);
           clearSession(from);
 
-          // Fire-and-forget
+          // Send WhatsApp chat confirmation (outside the flow)
           sendText(
             from,
-            `✅ *Bill Created!*\n\n` +
-            `📝 Bill ID: *${billId}*\n` +
-            `🏗️ Project: ${projectName}\n` +
-            `📋 Type: ${billType}\n` +
-            `💰 Amount: ₹${formattedAmount}\n` +
-            `📎 Files: ${fileCount} attached\n` +
-            `📌 Status: In Progress\n\n` +
+            `✅ *Bill Created Successfully!*\n\n` +
+            `📝 Bill ID:   *${billId}*\n` +
+            `🏗️ Project:  ${projectName}\n` +
+            `📋 Category: ${billType}\n` +
+            `💰 Amount:   ₹${fmt}\n` +
+            `🏪 Vendor:   ${vendor}\n` +
+            `📎 Files:    ${fileCount > 0 ? `${fileCount} attached` : "None"}\n` +
+            `📌 Status:   In Progress\n\n` +
             `_Send any message to create another bill._`
-          ).catch((e) => console.error("❌ sendText after confirm:", e.message));
+          ).catch((e) => console.error("❌ sendText (confirm):", e.message));
 
+          // Show SUCCESS screen inside the flow
           return {
             version: "3.0",
             screen:  "SUCCESS",
             data: {
-              bill_id:      billId,
-              project_name: projectName,
-              bill_type:    billType,
-              bill_amount:  formattedAmount,
-              attachments_count: fileCount > 0 ? `${fileCount} file${fileCount > 1 ? "s" : ""}` : "No files",
+              bill_id:           billId,
+              project_name:      projectName,
+              bill_type:         billType,
+              bill_amount:       fmt,
+              vendor_name:       vendor,
+              attachments_count:
+                fileCount > 0
+                  ? `${fileCount} file${fileCount > 1 ? "s" : ""}`
+                  : "No files",
             },
           };
+
         } catch (err) {
+          // DB save failed — show error on REVIEW screen
           console.error("❌ Bill save error:", err.message);
-          
-          const totalFiles = session.bill.photo_attachments.length + session.bill.document_attachments.length;
-          const attachmentText = totalFiles === 0 ? "No files" : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
-          
+
           return {
             version: "3.0",
             screen:  "REVIEW",
             data: {
-              user_name:     session.user?.name    || "—",
-              project_name:  session.bill.project_name,
-              bill_type:     session.bill.bill_type,
-              bill_amount:   session.bill.bill_amount.toLocaleString("en-IN"),
-              attachments_count: attachmentText,
-              remarks:       session.bill.remarks  || "None",
-              error_message: `Failed to save: ${err.message}`,
+              user_name:         session.user?.name                              || "—",
+              project_name:      session.bill.project_name                       || "—",
+              bill_type:         session.bill.bill_type                          || "—",
+              bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
+              vendor_name:       session.bill.vendor_name                        || "Not specified",
+              attachments_count: attachText,
+              remarks:           session.bill.remarks                            || "None",
+              error_message:     `❌ Save failed: ${err.message}`,
             },
           };
         }
@@ -549,24 +620,27 @@ async function handleFlowAction(from, action, screen, data, session) {
     }
   }
 
-  // ── UNKNOWN ─────────────────────────────────────────────────────────────────
-  console.warn(`⚠️  Unhandled: screen=${screen} | action=${action}`);
+  // ── FALLBACK — unknown screen/action ────────────────────────────────────────
+  console.warn(`⚠️  Unhandled | screen: ${screen} | action: ${action}`);
   return {
     version: "3.0",
     screen:  "WELCOME",
-    data: { user_name: session.user?.name || "there" },
+    data:    { user_name: session.user?.name || "there" },
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 📨 WEBHOOK ENDPOINTS
+// 📨 WEBHOOK ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── GET /webhook — Meta verification ─────────────────────────────────────────
+// ── GET / — Webhook verification (Meta challenge) ─────────────────────────────
 router.get("/", (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+  const {
+    "hub.mode":          mode,
+    "hub.verify_token":  token,
+    "hub.challenge":     challenge,
+  } = req.query;
+
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
     console.log("✅ Webhook verified");
     return res.status(200).send(challenge);
@@ -575,7 +649,7 @@ router.get("/", (req, res) => {
   res.sendStatus(403);
 });
 
-// ── GET /webhook/debug-users ────────────────────────────────────────────────
+// ── GET /debug-users — List all users with mobile numbers ────────────────────
 router.get("/debug-users", async (req, res) => {
   try {
     const users = await User.find({}).select("name mobile isActive").lean();
@@ -585,54 +659,56 @@ router.get("/debug-users", async (req, res) => {
   }
 });
 
-// ── GET /webhook/normalize-mobiles ──────────────────────────────────────────
+// ── GET /normalize-mobiles — One-time fix: convert all mobiles to E164 ───────
 router.get("/normalize-mobiles", async (req, res) => {
   try {
-    const users   = await User.find({});
-    let   updated = 0;
-    const report  = [];
+    const users  = await User.find({});
+    let updated  = 0;
+    const report = [];
+
     for (const u of users) {
-      const normalized = toE164Indian(u.mobile);
-      if (normalized && normalized !== u.mobile) {
-        report.push({ name: u.name, before: u.mobile, after: normalized });
-        u.mobile = normalized;
+      const normalised = toE164Indian(u.mobile);
+      if (normalised && normalised !== u.mobile) {
+        report.push({ name: u.name, before: u.mobile, after: normalised });
+        u.mobile = normalised;
         await u.save();
         updated++;
       }
     }
-    console.log(`🔧 Normalized ${updated} mobile numbers`);
     res.json({ updated, report });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /webhook — incoming WhatsApp messages ────────────────────────────────
+// ── POST / — Incoming WhatsApp messages ──────────────────────────────────────
 router.post("/", (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); // Acknowledge immediately to Meta (must be <5s)
+
   try {
-    const entry   = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value   = changes?.value;
+    const value   = req.body?.entry?.[0]?.changes?.[0]?.value;
     if (!value?.messages) return;
+
     const message = value.messages[0];
     const from    = message?.from;
     if (!from || !message) return;
-    handleIncomingMessage(from, message).catch((err) =>
-      console.error("❌ handleIncomingMessage error:", err.message)
+
+    handleIncomingMessage(from, message).catch((e) =>
+      console.error("❌ handleIncomingMessage crashed:", e.message)
     );
   } catch (err) {
-    console.error("❌ Webhook parse error:", err.message);
+    console.error("❌ Webhook POST parse error:", err.message);
   }
 });
 
-// ── POST /webhook/flow — encrypted Flow data exchange ─────────────────────────
+// ── POST /flow — WhatsApp Flow data exchange endpoint ────────────────────────
 router.post("/flow", async (req, res) => {
-  console.log(`\n📨 Flow Request`);
+  console.log(`\n📨 Flow Request received`);
+
   try {
     if (!FLOW_PRIVATE_KEY) {
       console.error("❌ FLOW_PRIVATE_KEY not set");
-      return res.status(500).json({ error: "Server not configured" });
+      return res.status(500).json({ error: "Server not configured — missing FLOW_PRIVATE_KEY" });
     }
 
     const decrypted = decryptFlowRequest(req.body);
@@ -642,22 +718,21 @@ router.post("/flow", async (req, res) => {
 
     const { action, screen, flow_token, data } = decrypted.parsed;
 
-    // ── Ping ──────────────────────────────────────────────────────────────────
+    // Health check ping from Meta — just reply active
     if (action === "ping") {
-      console.log("🏓 Ping — responding active");
-      const encrypted = encryptFlowResponse(
+      const enc = encryptFlowResponse(
         { version: "3.0", data: { status: "active" } },
         decrypted.aesKey,
         decrypted.iv
       );
       res.set("Content-Type", "text/plain");
-      return res.status(200).send(encrypted);
+      return res.status(200).send(enc);
     }
 
     const from = flow_token;
     if (!from) {
-      console.error("❌ No phone number in flow_token");
-      return res.status(400).json({ error: "No phone number" });
+      console.error("❌ No flow_token (phone number) in request");
+      return res.status(400).json({ error: "Missing flow_token" });
     }
 
     console.log(`   From: ${from} | Action: ${action} | Screen: ${screen}`);
@@ -670,8 +745,8 @@ router.post("/flow", async (req, res) => {
     return res.status(200).send(encrypted);
 
   } catch (err) {
-    console.error("❌ Flow error:", err.message);
-    return res.status(500).json({ error: "Server error" });
+    console.error("❌ Flow endpoint error:", err.message);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
