@@ -6,7 +6,7 @@ const { protect } = require("../middleware/authMiddleware");
 // GET /api/projects?company=id
 router.get("/", protect, async (req, res) => {
   try {
-    const filter = req.query.company ? { company: req.query.company, isActive: true } : { isActive: true };
+    const filter = req.query.company ? { company: req.query.company  } : {};
     const projects = await Project.find(filter).populate("company");
     res.json(projects);
   } catch (err) {

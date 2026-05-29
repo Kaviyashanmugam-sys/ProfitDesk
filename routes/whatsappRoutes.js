@@ -33,6 +33,9 @@ const FLOW_ID          = process.env.FLOW_ID;
 const FLOW_PRIVATE_KEY = process.env.FLOW_PRIVATE_KEY;
 const GRAPH_URL        = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}`;
 
+// Session TTL: 30 minutes
+const SESSION_TTL_MS = 30 * 60 * 1000;
+
 console.log("\n📱 ProfitDesk WhatsApp Bot Started");
 console.log(`   PHONE_NUMBER_ID:  ${PHONE_NUMBER_ID  ? "✅" : "❌ MISSING"}`);
 console.log(`   ACCESS_TOKEN:     ${ACCESS_TOKEN     ? "✅" : "❌ MISSING"}`);
@@ -57,9 +60,9 @@ const CATEGORY_MAP = {
 function toE164Indian(phone) {
   if (!phone) return null;
   const d = String(phone).replace(/\D/g, "");
-  if (d.length === 10)                        return `+91${d}`;
-  if (d.length === 12 && d.startsWith("91")) return `+${d}`;
-  if (d.length === 13 && d.startsWith("910"))return `+91${d.slice(3)}`;
+  if (d.length === 10)                         return `+91${d}`;
+  if (d.length === 12 && d.startsWith("91"))   return `+${d}`;
+  if (d.length === 13 && d.startsWith("910"))  return `+91${d.slice(3)}`;
   return `+${d}`;
 }
 
@@ -68,16 +71,25 @@ function last10(phone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 💾 IN-MEMORY SESSION STORE
+// 💾 IN-MEMORY SESSION STORE  (with 30-min TTL)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const sessions = {};
 
 function getSession(from) {
+  const now = Date.now();
+
+  // Evict stale session
+  if (sessions[from] && (now - sessions[from].createdAt > SESSION_TTL_MS)) {
+    console.log(`🗑️  Session expired for ${from} — evicting`);
+    delete sessions[from];
+  }
+
   if (!sessions[from]) {
     sessions[from] = {
-      user:     null,
-      projects: [],
+      createdAt: now,
+      user:      null,
+      projects:  [],
       bill: {
         project_id:           null,
         project_name:         null,
@@ -90,6 +102,7 @@ function getSession(from) {
       },
     };
   }
+
   return sessions[from];
 }
 
@@ -103,12 +116,28 @@ function clearSession(from) {
 
 function decryptFlowRequest(body) {
   try {
+    console.log("🔐 Decryption started...");
+    console.log(`   key starts: ${FLOW_PRIVATE_KEY?.substring(0, 40)}`);
+
     const encryptedAesKey = Buffer.from(body.encrypted_aes_key, "base64");
-    const privateKeyObj   = crypto.createPrivateKey(FLOW_PRIVATE_KEY);
+
+    let privateKeyObj;
+    try {
+      privateKeyObj = crypto.createPrivateKey(FLOW_PRIVATE_KEY);
+      console.log("✅ Private key parsed OK");
+    } catch (keyErr) {
+      console.error("❌ Key parse error:", keyErr.message);
+      const fixedKey = FLOW_PRIVATE_KEY.replace(/\\n/g, "\n");
+      privateKeyObj  = crypto.createPrivateKey(fixedKey);
+      console.log("✅ Private key parsed OK after fix");
+    }
+
     const decryptedAesKey = crypto.privateDecrypt(
       { key: privateKeyObj, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
       encryptedAesKey
     );
+    console.log("✅ AES key decrypted");
+
     const iv         = Buffer.from(body.initial_vector, "base64");
     const encrypted  = Buffer.from(body.encrypted_flow_data, "base64");
     const TAG_LENGTH = 16;
@@ -117,9 +146,11 @@ function decryptFlowRequest(body) {
     const decipher   = crypto.createDecipheriv("aes-128-gcm", decryptedAesKey, iv);
     decipher.setAuthTag(tag);
     const decrypted  = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    console.log("✅ Decryption complete");
     return { parsed: JSON.parse(decrypted.toString("utf8")), aesKey: decryptedAesKey, iv };
   } catch (err) {
     console.error("❌ Decryption error:", err.message);
+    console.error("   Stack:", err.stack?.split("\n")[0]);
     return null;
   }
 }
@@ -165,14 +196,45 @@ async function findUserByPhone(whatsappNumber) {
 }
 
 async function loadProjects(user) {
-  const companyIds = user.companies.map((c) => c._id);
-  const rows = await Project.find({ company: { $in: companyIds }, isActive: true })
+  if (!user.companies || user.companies.length === 0) {
+    console.warn(`⚠️ User ${user.name} has no companies assigned`);
+    return [];
+  }
+
+  const companyIds = user.companies.map((c) => c._id || c);
+  console.log(`🔍 Loading projects for companies: ${companyIds}`);
+
+  const rows = await Project.find({
+    company:  { $in: companyIds },
+    isActive: true,
+  })
     .populate("company")
     .lean();
+
+  console.log(`📁 Found ${rows.length} projects for user: ${user.name}`);
+
   return rows.map((p) => ({
     id:    p._id.toString(),
     title: p.name + (p.location ? ` — ${p.location}` : ""),
   }));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔄 ENSURE SESSION USER + PROJECTS  (shared helper used across screens)
+//
+//  Call this at the top of any screen handler that needs session.user or
+//  session.projects — it re-hydrates from DB when the session was evicted
+//  (server restart, 30-min TTL) so the dropdown is never empty.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function ensureSession(from, session) {
+  if (!session.user) {
+    session.user = await findUserByPhone(from);
+  }
+  if (session.user && (!session.projects || session.projects.length === 0)) {
+    session.projects = await loadProjects(session.user);
+  }
+  return session.user;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -271,27 +333,24 @@ async function handleFlowAction(from, action, screen, data, session) {
 
   // ── INIT → BILL_FORM ────────────────────────────────────────────────────────
   if (action === "INIT") {
-    let user     = session.user;
-    let projects = session.projects;
+    const user = await findUserByPhone(from);
 
     if (!user) {
-      user = await findUserByPhone(from);
-      if (!user) {
-        return {
-          version: "3.0",
-          screen:  "BILL_FORM",
-          data: {
-            projects:       [],
-            project_error:  "Your number is not registered. Contact admin.",
-            category_error: "",
-            amount_error:   "",
-          },
-        };
-      }
-      projects         = await loadProjects(user);
-      session.user     = user;
-      session.projects = projects;
+      return {
+        version: "3.0",
+        screen:  "BILL_FORM",
+        data: {
+          projects:       [],
+          project_error:  "Your number is not registered. Contact admin.",
+          category_error: "",
+          amount_error:   "",
+        },
+      };
     }
+
+    const projects   = await loadProjects(user);
+    session.user     = user;
+    session.projects = projects;
 
     console.log(`✅ INIT → BILL_FORM | user: ${user.name} | projects: ${projects.length}`);
 
@@ -312,12 +371,34 @@ async function handleFlowAction(from, action, screen, data, session) {
 
     // ── BILL_FORM → ADD_PHOTOS ──────────────────────────────────────────────
     if (screen === "BILL_FORM") {
+
+      // ✅ FIX: Always re-hydrate user + projects from DB.
+      // session.projects is [] when the server restarted after INIT
+      // (in-memory sessions don't survive restarts). Without this,
+      // any validation error re-renders BILL_FORM with an empty dropdown.
+      const user = await ensureSession(from, session);
+
+      if (!user) {
+        return {
+          version: "3.0",
+          screen:  "BILL_FORM",
+          data: {
+            projects:       [],
+            project_error:  "Session expired. Please send any message to restart.",
+            category_error: "",
+            amount_error:   "",
+          },
+        };
+      }
+
+      const freshProjects = session.projects; // populated by ensureSession above
+
       const projectId = data?.selected_project;
       const billType  = data?.bill_type;
       const amount    = parseFloat(String(data?.bill_amount || "").replace(/,/g, ""));
 
-      const projectError  = !projectId                            ? "Please select a project."    : "";
-      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."   : "";
+      const projectError  = !projectId                            ? "Please select a project."     : "";
+      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."    : "";
       const amountError   = isNaN(amount) || amount <= 0         ? "Please enter a valid amount." : "";
 
       if (projectError || categoryError || amountError) {
@@ -325,7 +406,7 @@ async function handleFlowAction(from, action, screen, data, session) {
           version: "3.0",
           screen:  "BILL_FORM",
           data: {
-            projects:       session.projects   || [],
+            projects:       freshProjects, // ✅ always fresh from DB
             project_error:  projectError,
             category_error: categoryError,
             amount_error:   amountError,
@@ -333,7 +414,7 @@ async function handleFlowAction(from, action, screen, data, session) {
         };
       }
 
-      const project             = session.projects.find((p) => p.id === projectId);
+      const project             = freshProjects.find((p) => p.id === projectId);
       session.bill.project_id   = projectId;
       session.bill.project_name = project?.title || projectId;
       session.bill.bill_type    = CATEGORY_MAP[billType];
@@ -384,13 +465,13 @@ async function handleFlowAction(from, action, screen, data, session) {
         version: "3.0",
         screen:  "REVIEW",
         data: {
-          user_name:         session.user?.name                        || "—",
-          project_name:      session.bill.project_name                 || "—",
-          bill_type:         session.bill.bill_type                    || "—",
+          user_name:         session.user?.name                         || "—",
+          project_name:      session.bill.project_name                  || "—",
+          bill_type:         session.bill.bill_type                     || "—",
           bill_amount:       session.bill.bill_amount.toLocaleString("en-IN"),
-          vendor_name:       session.bill.vendor_name                  || "Not specified",
+          vendor_name:       session.bill.vendor_name                   || "Not specified",
           attachments_count: attachmentText,
-          remarks:           session.bill.remarks                      || "None",
+          remarks:           session.bill.remarks                       || "None",
           error_message:     "",
         },
       };
@@ -416,13 +497,13 @@ async function handleFlowAction(from, action, screen, data, session) {
           version: "3.0",
           screen:  "REVIEW",
           data: {
-            user_name:         session.user?.name                              || "—",
-            project_name:      session.bill.project_name                       || "—",
-            bill_type:         session.bill.bill_type                          || "—",
+            user_name:         session.user?.name                               || "—",
+            project_name:      session.bill.project_name                        || "—",
+            bill_type:         session.bill.bill_type                           || "—",
             bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
-            vendor_name:       session.bill.vendor_name                        || "Not specified",
+            vendor_name:       session.bill.vendor_name                         || "Not specified",
             attachments_count: attachText,
-            remarks:           session.bill.remarks                            || "None",
+            remarks:           session.bill.remarks                             || "None",
             error_message:     "Please confirm or cancel to proceed.",
           },
         };
@@ -430,8 +511,7 @@ async function handleFlowAction(from, action, screen, data, session) {
 
       // ── CANCEL ────────────────────────────────────────────────────────────
       if (confirmation === "cancel") {
-        const userName   = session.user?.name || "there";
-        const projects   = session.projects   || [];
+        const projects = session.projects || [];
         clearSession(from);
 
         sendText(from,
@@ -516,13 +596,13 @@ async function handleFlowAction(from, action, screen, data, session) {
             version: "3.0",
             screen:  "REVIEW",
             data: {
-              user_name:         session.user?.name                              || "—",
-              project_name:      session.bill.project_name                       || "—",
-              bill_type:         session.bill.bill_type                          || "—",
+              user_name:         session.user?.name                               || "—",
+              project_name:      session.bill.project_name                        || "—",
+              bill_type:         session.bill.bill_type                           || "—",
               bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
-              vendor_name:       session.bill.vendor_name                        || "Not specified",
+              vendor_name:       session.bill.vendor_name                         || "Not specified",
               attachments_count: attachText,
-              remarks:           session.bill.remarks                            || "None",
+              remarks:           session.bill.remarks                             || "None",
               error_message:     `❌ Save failed: ${err.message}`,
             },
           };
@@ -533,11 +613,15 @@ async function handleFlowAction(from, action, screen, data, session) {
 
   // ── FALLBACK ────────────────────────────────────────────────────────────────
   console.warn(`⚠️  Unhandled | screen: ${screen} | action: ${action}`);
+
+  // ✅ FIX: Even in fallback, ensure projects are loaded so dropdown is never empty
+  await ensureSession(from, session);
+
   return {
     version: "3.0",
     screen:  "BILL_FORM",
     data: {
-      projects:       session.projects   || [],
+      projects:       session.projects || [],
       project_error:  "",
       category_error: "",
       amount_error:   "",
@@ -569,10 +653,8 @@ router.get("/debug-users", async (req, res) => {
 
 router.get("/debug-projects", async (req, res) => {
   try {
-    // All projects in DB
     const allProjects = await Project.find({}).lean();
 
-    // Per-user project mapping
     const users  = await User.find({ isActive: true }).populate("companies").lean();
     const mapped = [];
 
@@ -667,5 +749,6 @@ router.post("/flow", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 module.exports = router;
