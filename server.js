@@ -21,10 +21,10 @@ app.use(cors());
 // 3️⃣ Static Files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// 4️⃣ Request Logging (Optional - for debugging)
+// 4️⃣ Request Logging
 app.use((req, res, next) => {
-  if (req.path === "/webhook" || req.path === "/webhook/flow") {
-    console.log(`\n📨 ${req.method} ${req.path}`);
+  if (req.path === "/" || req.path === "/flow") {
+    console.log(`\n📨 ${req.method} /webhook${req.path}`);
     console.log(`   Headers:`, req.headers["content-type"]);
     if (req.method === "POST") {
       console.log(`   Body Keys:`, Object.keys(req.body || {}).join(", "));
@@ -37,15 +37,14 @@ app.use((req, res, next) => {
 // 📦 ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// API Routes
-app.use("/api/auth", require("./routes/authRoutes"));
-app.use("/api/companies", require("./routes/companyRoutes"));
-app.use("/api/projects", require("./routes/projectRoutes"));
-app.use("/api/bills", require("./routes/billRoutes"));
+app.use("/api/auth",       require("./routes/authRoutes"));
+app.use("/api/companies",  require("./routes/companyRoutes"));
+app.use("/api/projects",   require("./routes/projectRoutes"));
+app.use("/api/bills",      require("./routes/billRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
-app.use("/api/users", require("./routes/userRoutes"));
+app.use("/api/users",      require("./routes/userRoutes"));
 
-// ⭐ WhatsApp Routes (mounted at /webhook)
+// ⭐ WhatsApp Routes
 app.use("/webhook", require("./routes/whatsappRoutes"));
 
 // Health Check
@@ -73,7 +72,6 @@ mongoose
     process.exit(1);
   });
 
-// Handle MongoDB connection events
 mongoose.connection.on("disconnected", () => {
   console.warn("⚠️ MongoDB disconnected");
 });
@@ -93,25 +91,21 @@ app.listen(PORT, () => {
   console.log("🚀 ProfitDesk Server Started");
   console.log("═".repeat(80));
   console.log(`📡 Port: ${PORT}`);
-  console.log(`🔗 Health Check: http://localhost:${PORT}/health`);
-  console.log(`📲 WhatsApp Webhook: http://localhost:${PORT}/webhook`);
-  console.log(`🔄 Flow Endpoint: http://localhost:${PORT}/webhook/flow`);
-  console.log("\n⚙️  Environment Variables Loaded:");
-  console.log(`   MONGO_URI: ${MONGO_URI ? "✅" : "❌"}`);
-  console.log(
-    `   WHATSAPP_PHONE_NUMBER_ID: ${process.env.WHATSAPP_PHONE_NUMBER_ID ? "✅" : "❌"}`
-  );
-  console.log(
-    `   WHATSAPP_ACCESS_TOKEN: ${process.env.WHATSAPP_ACCESS_TOKEN ? "✅" : "❌"}`
-  );
-  console.log(`   WHATSAPP_VERIFY_TOKEN: ${process.env.WHATSAPP_VERIFY_TOKEN ? "✅" : "❌"}`);
-  console.log(`   FLOW_ID: ${process.env.FLOW_ID ? "✅" : "❌"}`);
+  console.log(`🔗 Health: http://localhost:${PORT}/health`);
+  console.log(`📲 Webhook: http://localhost:${PORT}/webhook`);
+  console.log(`🔄 Flow:    http://localhost:${PORT}/webhook/flow`);
+  console.log("\n⚙️  Environment:");
+  console.log(`   MONGO_URI:                ${process.env.MONGO_URI                ? "✅" : "❌"}`);
+  console.log(`   WHATSAPP_PHONE_NUMBER_ID: ${process.env.WHATSAPP_PHONE_NUMBER_ID ? "✅" : "❌"}`);
+  console.log(`   WHATSAPP_ACCESS_TOKEN:    ${process.env.WHATSAPP_ACCESS_TOKEN    ? "✅" : "❌"}`);
+  console.log(`   WHATSAPP_VERIFY_TOKEN:    ${process.env.WHATSAPP_VERIFY_TOKEN    ? "✅" : "❌"}`);
+  console.log(`   FLOW_ID:                  ${process.env.FLOW_ID                  ? "✅" : "❌"}`);
+  console.log(`   FLOW_PRIVATE_KEY:         ${process.env.FLOW_PRIVATE_KEY         ? "✅" : "❌"}`);
   console.log("═".repeat(80) + "\n");
 });
 
-// Graceful Shutdown
 process.on("SIGTERM", () => {
-  console.log("SIGTERM received, closing server gracefully...");
+  console.log("SIGTERM received, closing gracefully...");
   mongoose.connection.close();
   process.exit(0);
 });
