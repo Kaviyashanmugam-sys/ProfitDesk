@@ -567,6 +567,37 @@ router.get("/debug-users", async (req, res) => {
   }
 });
 
+router.get("/debug-projects", async (req, res) => {
+  try {
+    // All projects in DB
+    const allProjects = await Project.find({}).lean();
+
+    // Per-user project mapping
+    const users  = await User.find({ isActive: true }).populate("companies").lean();
+    const mapped = [];
+
+    for (const u of users) {
+      const companyIds = u.companies.map((c) => c._id);
+      const projects   = await Project.find({ company: { $in: companyIds }, isActive: true }).lean();
+      mapped.push({
+        user:      u.name,
+        mobile:    u.mobile,
+        companies: u.companies.map((c) => ({ id: c._id, name: c.name })),
+        projects:  projects.map((p) => ({ id: p._id, name: p.name, isActive: p.isActive })),
+      });
+    }
+
+    res.json({
+      allProjectsInDB: allProjects.map((p) => ({
+        id: p._id, name: p.name, company: p.company, isActive: p.isActive,
+      })),
+      userProjectMapping: mapped,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get("/normalize-mobiles", async (req, res) => {
   try {
     const users = await User.find({});
