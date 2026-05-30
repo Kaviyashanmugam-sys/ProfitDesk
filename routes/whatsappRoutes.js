@@ -262,7 +262,7 @@ async function sendFlowMessage(to, user) {
           action: {
             name: "flow",
             parameters: {
-              flow_message_version: "6",
+              flow_message_version: "3",
               flow_id:              FLOW_ID,
               flow_cta:             "📋 Create Bill",
               flow_token:           normalizedTo,
