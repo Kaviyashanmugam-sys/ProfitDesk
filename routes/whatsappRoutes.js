@@ -22,7 +22,7 @@ const PHONE_NUMBER_ID  = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN     = process.env.WHATSAPP_ACCESS_TOKEN;
 const FLOW_ID          = process.env.FLOW_ID;
 const FLOW_PRIVATE_KEY = process.env.FLOW_PRIVATE_KEY;
-const GRAPH_URL        = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}`;
+const GRAPH_URL        = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}`;
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -264,7 +264,7 @@ async function sendFlowMessage(to, user) {
             parameters: {
 
               flow_id:              FLOW_ID,
-              flow_message_version: "5",
+              flow_message_version: "3",
               flow_cta:             "📋 Create Bill",
               flow_token:           to,
               mode:                 "published",
