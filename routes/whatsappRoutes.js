@@ -60,6 +60,13 @@ function last10(phone) {
   return String(phone || "").replace(/\D/g, "").slice(-10);
 }
 
+function normalizeFrom(raw) {
+  if (!raw) return raw;
+  const s = String(raw).trim();
+  if (s.startsWith("+")) return s;
+  return toE164Indian(s);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 💾 IN-MEMORY SESSION STORE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -141,8 +148,6 @@ function encryptFlowResponse(responseObj, aesKey, iv) {
   return Buffer.concat([encrypted, cipher.getAuthTag()]).toString("base64");
 }
 
-// Safe wrapper — always returns an encrypted response, never raw JSON
-// This prevents "something went wrong" errors on WhatsApp side
 function sendEncrypted(res, responseObj, aesKey, iv) {
   try {
     const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
@@ -162,6 +167,13 @@ async function findUserByPhone(whatsappNumber) {
   if (!whatsappNumber) return null;
   const tail10     = last10(whatsappNumber);
   console.log(`🔍 findUserByPhone | input="${whatsappNumber}" tail10="${tail10}"`);
+
+  // Skip lookup for test/dummy tokens
+  if (tail10.length < 10 || isNaN(Number(tail10))) {
+    console.warn(`⚠️ Skipping DB lookup — looks like test token: "${whatsappNumber}"`);
+    return null;
+  }
+
   const candidates = [`+91${tail10}`, `91${tail10}`, tail10, `0${tail10}`];
 
   let user = await User.findOne(
@@ -230,11 +242,11 @@ async function sendText(to, text) {
 
 async function sendFlowMessage(to, user) {
   try {
-    // Pre-load into session cache so INIT handler finds them instantly
-    const session    = getSession(to);
-    session.user     = user;
-    session.projects = await loadProjects(user);
-    console.log(`📁 Pre-cached ${session.projects.length} projects for INIT | user: ${user.name}`);
+    const normalizedTo   = normalizeFrom(to);
+    const session        = getSession(normalizedTo);
+    session.user         = user;
+    session.projects     = await loadProjects(user);
+    console.log(`📁 Pre-cached ${session.projects.length} projects | user: ${user.name} | key: ${normalizedTo}`);
 
     await axios.post(
       `${GRAPH_URL}/messages`,
@@ -250,17 +262,18 @@ async function sendFlowMessage(to, user) {
           action: {
             name: "flow",
             parameters: {
-              flow_message_version: "3",
+              flow_message_version: "6",
               flow_id:              FLOW_ID,
               flow_cta:             "📋 Create Bill",
-              flow_token:           to,
+              flow_token:           normalizedTo,
+              mode:                 "published",
             },
           },
         },
       },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
-    console.log(`✅ Flow sent to ${to} (${user.name}) | projects: ${session.projects.length}`);
+    console.log(`✅ Flow sent to ${to} (${user.name}) | flow_token: ${normalizedTo} | projects: ${session.projects.length}`);
   } catch (err) {
     console.error("❌ sendFlowMessage error:", err.response?.data || err.message);
   }
@@ -282,10 +295,11 @@ async function handleIncomingMessage(from, message) {
     return;
   }
 
-  const session    = getSession(from);
-  session.user     = user;
-  session.projects = await loadProjects(user);
-  console.log(`✅ Session ready | ${user.name} | projects: ${session.projects.length}`);
+  const normalizedFrom = normalizeFrom(from);
+  const session        = getSession(normalizedFrom);
+  session.user         = user;
+  session.projects     = await loadProjects(user);
+  console.log(`✅ Session ready | ${user.name} | key: ${normalizedFrom} | projects: ${session.projects.length}`);
 
   await sendFlowMessage(from, user);
 }
@@ -299,43 +313,33 @@ async function handleFlowAction(from, action, screen, data, session) {
 
   // ── INIT ─────────────────────────────────────────────────────────────────────
   if (action === "INIT") {
-    console.log(`🔍 INIT | flow_token="${from}"`);
+    console.log(`🔍 INIT | from="${from}" | session.projects=${session.projects?.length}`);
 
-    // Always fetch fresh from DB — don't rely on session cache only
-    // Session may be empty if user opened flow without sending a message first
-    let user     = await findUserByPhone(from);
+    const user = await findUserByPhone(from);
     let projects = [];
 
     if (user) {
       projects         = await loadProjects(user);
       session.user     = user;
       session.projects = projects;
-    } else if (session.user) {
-      // Fallback: flow_token format may not match DB — use cached session
-      user     = session.user;
-      projects = session.projects.length ? session.projects : await loadProjects(user);
-      console.log(`⚠️  INIT: flow_token lookup failed, using session cache for "${user.name}"`);
     }
 
     console.log(`📤 INIT response | user="${user?.name || "NOT FOUND"}" | projects=${projects.length}`);
 
-    if (!user) {
-      return {
-        version: "3.0",
-        screen:  "BILL_FORM",
-        data: {
-          projects:       [],
-          project_error:  "Your number is not registered. Contact admin.",
-          category_error: "",
-          amount_error:   "",
-        },
-      };
+    // ✅ Empty projects fix — RadioButtonsGroup needs at least 1 item
+    if (projects.length === 0) {
+      projects = [{ id: "none", title: user ? "No projects assigned" : "Not registered — contact admin" }];
     }
 
     return {
       version: "3.0",
       screen:  "BILL_FORM",
-      data: { projects, project_error: "", category_error: "", amount_error: "" },
+      data: {
+        projects,
+        project_error:  user ? "" : "Your number is not registered. Contact admin.",
+        category_error: "",
+        amount_error:   "",
+      },
     };
   }
 
@@ -351,7 +355,7 @@ async function handleFlowAction(from, action, screen, data, session) {
           version: "3.0",
           screen:  "BILL_FORM",
           data: {
-            projects:       [],
+            projects:       [{ id: "none", title: "Session expired — send any message to restart" }],
             project_error:  "Session expired. Send any message to restart.",
             category_error: "",
             amount_error:   "",
@@ -364,15 +368,19 @@ async function handleFlowAction(from, action, screen, data, session) {
       const amount        = parseFloat(String(data?.bill_amount || "").replace(/,/g, ""));
       const freshProjects = session.projects;
 
-      const projectError  = !projectId                            ? "Please select a project."     : "";
-      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."    : "";
-      const amountError   = isNaN(amount) || amount <= 0         ? "Please enter a valid amount." : "";
+      // Block dummy project selection
+      const projectError  = (!projectId || projectId === "none")      ? "Please select a project."     : "";
+      const categoryError = !billType || !CATEGORY_MAP[billType]      ? "Please select a category."    : "";
+      const amountError   = isNaN(amount) || amount <= 0              ? "Please enter a valid amount." : "";
 
       if (projectError || categoryError || amountError) {
+        const displayProjects = freshProjects.length > 0
+          ? freshProjects
+          : [{ id: "none", title: "No projects assigned" }];
         return {
           version: "3.0",
           screen:  "BILL_FORM",
-          data: { projects: freshProjects, project_error: projectError, category_error: categoryError, amount_error: amountError },
+          data: { projects: displayProjects, project_error: projectError, category_error: categoryError, amount_error: amountError },
         };
       }
 
@@ -483,7 +491,7 @@ async function handleFlowAction(from, action, screen, data, session) {
             engineer:    session.user._id,
             category:    session.bill.bill_type,
             amount:      session.bill.bill_amount,
-            vendorName:  session.bill.vendor_name,
+            vendor:      session.bill.vendor_name,
             remarks:     session.bill.remarks,
             status:      "In Progress",
             attachments: allFiles,
@@ -548,10 +556,13 @@ async function handleFlowAction(from, action, screen, data, session) {
   // ── FALLBACK ──────────────────────────────────────────────────────────────────
   console.warn(`⚠️  Unhandled | screen="${screen}" action="${action}"`);
   await ensureSession(from, session);
+  const fallbackProjects = session.projects?.length > 0
+    ? session.projects
+    : [{ id: "none", title: "No projects assigned" }];
   return {
     version: "3.0",
     screen:  "BILL_FORM",
-    data: { projects: session.projects || [], project_error: "", category_error: "", amount_error: "" },
+    data: { projects: fallbackProjects, project_error: "", category_error: "", amount_error: "" },
   };
 }
 
@@ -641,10 +652,9 @@ router.post("/", (req, res) => {
 router.post("/flow", async (req, res) => {
   console.log(`\n📨 Flow Request received`);
 
-  // Step 1: decrypt
   if (!FLOW_PRIVATE_KEY) {
     console.error("❌ FLOW_PRIVATE_KEY missing");
-    return res.status(500).end(); // before decryption, can't encrypt response
+    return res.status(500).end();
   }
 
   const decrypted = decryptFlowRequest(req.body);
@@ -660,24 +670,29 @@ router.post("/flow", async (req, res) => {
   console.log(`   action="${action}" screen="${screen}" flow_token="${flow_token}"`);
 
   try {
-    // Step 2: ping
     if (action === "ping") {
       return sendEncrypted(res, { version: "3.0", data: { status: "active" } }, aesKey, iv);
     }
 
-    // Step 3: resolve from
-    const from = flow_token || "";
+    // Normalize flow_token to E.164 so session key always matches
+    const rawToken = flow_token || "";
+    const from     = rawToken ? normalizeFrom(rawToken) : "";
+    console.log(`   normalized from: "${from}"`);
+
     if (!from) {
-      console.error("❌ flow_token is empty");
-      // Return BILL_FORM with empty projects — at least won't crash
+      console.error("❌ flow_token is empty or undefined");
       return sendEncrypted(res, {
         version: "3.0",
         screen:  "BILL_FORM",
-        data: { projects: [], project_error: "Session error. Please restart.", category_error: "", amount_error: "" },
+        data: {
+          projects:       [{ id: "none", title: "Session error — please restart" }],
+          project_error:  "Session error. Please restart.",
+          category_error: "",
+          amount_error:   "",
+        },
       }, aesKey, iv);
     }
 
-    // Step 4: handle action
     const session     = getSession(from);
     const responseObj = await handleFlowAction(from, action, screen, data, session);
 
@@ -687,11 +702,15 @@ router.post("/flow", async (req, res) => {
   } catch (err) {
     console.error("❌ Flow handler error:", err.message);
     console.error(err.stack);
-    // Always send encrypted error screen — never raw JSON
     return sendEncrypted(res, {
       version: "3.0",
       screen:  "BILL_FORM",
-      data: { projects: [], project_error: "Server error. Please try again.", category_error: "", amount_error: "" },
+      data: {
+        projects:       [{ id: "none", title: "Server error — please try again" }],
+        project_error:  "Server error. Please try again.",
+        category_error: "",
+        amount_error:   "",
+      },
     }, aesKey, iv);
   }
 });
