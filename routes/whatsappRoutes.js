@@ -264,6 +264,7 @@ async function sendFlowMessage(to, user) {
             parameters: {
 
               flow_id:              FLOW_ID,
+              flow_message_version: "6",
               flow_cta:             "📋 Create Bill",
               flow_token:           to,
               mode:                 "published",
