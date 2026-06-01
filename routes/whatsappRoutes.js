@@ -75,14 +75,14 @@ function decryptFlowRequest(body) {
       { key: privateKeyObj, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
       encryptedAesKey
     );
-    const iv        = Buffer.from(body.initial_vector, "base64");
-    const encrypted = Buffer.from(body.encrypted_flow_data, "base64");
+    const iv         = Buffer.from(body.initial_vector, "base64");
+    const encrypted  = Buffer.from(body.encrypted_flow_data, "base64");
     const TAG_LENGTH = 16;
     const tag        = encrypted.slice(-TAG_LENGTH);
     const ciphertext = encrypted.slice(0, -TAG_LENGTH);
     const decipher   = crypto.createDecipheriv("aes-128-gcm", decryptedAesKey, iv);
     decipher.setAuthTag(tag);
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const decrypted  = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     console.log("✅ Decryption complete");
     return { parsed: JSON.parse(decrypted.toString("utf8")), aesKey: decryptedAesKey, iv };
   } catch (err) { console.error("❌ Decryption error:", err.message); return null; }
@@ -178,21 +178,14 @@ async function handleFlowAction(from, action, screen, data, session) {
   // ─── INIT ───────────────────────────────────────────────────────────────────
   if (action === "INIT") {
     session.user = await findUserByPhone(from);
-
     if (session.user && (!session.user.companies || session.user.companies.length === 0)) {
       await session.user.populate("companies");
     }
-
     console.log(`📤 INIT | user="${session.user?.name || "NOT FOUND"}" | companies=${session.user?.companies?.length || 0}`);
-
     return {
       version: "3.0",
       screen:  "BILL_FORM",
-      data: {
-        project_error:  "",
-        category_error: "",
-        amount_error:   "",
-      },
+      data:    { project_error: "", category_error: "", amount_error: "" },
     };
   }
 
@@ -205,7 +198,7 @@ async function handleFlowAction(from, action, screen, data, session) {
       const billType      = data?.bill_type;
       const amount        = parseFloat(String(data?.bill_amount || "").replace(/,/g, ""));
       const projectError  = !projectName                          ? "Please enter project name."   : "";
-      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."   : "";
+      const categoryError = !billType || !CATEGORY_MAP[billType] ? "Please select a category."    : "";
       const amountError   = isNaN(amount) || amount <= 0         ? "Please enter a valid amount." : "";
 
       if (projectError || categoryError || amountError) {
@@ -224,7 +217,7 @@ async function handleFlowAction(from, action, screen, data, session) {
       return { version: "3.0", screen: "ADD_PHOTOS", data: { error_message: "" } };
     }
 
-    // ── ADD_PHOTOS ──
+    // ── ADD_PHOTOS → go to ADD_DOCUMENTS ──
     if (screen === "ADD_PHOTOS") {
       const photos = data?.photo_attachments || [];
       session.bill.photo_attachments = Array.isArray(photos) ? photos : [];
@@ -232,166 +225,106 @@ async function handleFlowAction(from, action, screen, data, session) {
       return { version: "3.0", screen: "ADD_DOCUMENTS", data: { error_message: "" } };
     }
 
-    // ── ADD_DOCUMENTS ──
+    // ── ADD_DOCUMENTS → DIRECT SUBMIT ──
     if (screen === "ADD_DOCUMENTS") {
       const docs = data?.document_attachments || [];
       session.bill.document_attachments = Array.isArray(docs) ? docs : [];
-      const totalFiles = session.bill.photo_attachments.length + session.bill.document_attachments.length;
+      const allFiles   = [...(session.bill.photo_attachments || []), ...session.bill.document_attachments];
+      const totalFiles = allFiles.length;
       const attachText = totalFiles === 0 ? "No files" : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
-      return {
-        version: "3.0", screen: "REVIEW",
-        data: {
-          user_name:         session.user?.name                                || "—",
-          project_name:      session.bill.project_name                         || "—",
-          bill_type:         session.bill.bill_type                            || "—",
-          bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
-          vendor_name:       session.bill.vendor_name                          || "Not specified",
-          attachments_count: attachText,
-          remarks:           session.bill.remarks                              || "None",
-          error_message:     "",
-        },
-      };
-    }
 
-    // ── REVIEW ──
-    if (screen === "REVIEW") {
-      const confirmation = data?.confirmation;
-      const allFiles     = [...(session.bill.photo_attachments || []), ...(session.bill.document_attachments || [])];
-      const totalFiles   = allFiles.length;
-      const attachText   = totalFiles === 0 ? "No files" : `${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
+      console.log(`📎 Photos: ${session.bill.photo_attachments.length} | Docs: ${session.bill.document_attachments.length}`);
 
-      if (!confirmation) {
-        return {
-          version: "3.0", screen: "REVIEW",
-          data: {
-            user_name:         session.user?.name                                || "—",
-            project_name:      session.bill.project_name                         || "—",
-            bill_type:         session.bill.bill_type                            || "—",
-            bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
-            vendor_name:       session.bill.vendor_name                          || "Not specified",
-            attachments_count: attachText,
-            remarks:           session.bill.remarks                              || "None",
-            error_message:     "Please confirm or cancel to proceed.",
-          },
+      try {
+        // 🔧 Re-fetch user if null
+        let user = session.user;
+        if (!user) user = await findUserByPhone(from);
+        if (!user) throw new Error("User not found. Please contact admin.");
+
+        // 🔧 Re-populate companies if missing
+        if (!user.companies || user.companies.length === 0) {
+          await user.populate("companies");
+        }
+        if (!user.companies || user.companies.length === 0) {
+          throw new Error("No company linked to this user. Please contact admin.");
+        }
+
+        console.log(`👤 User: ${user.name} | Companies: ${user.companies.length}`);
+
+        const now    = new Date();
+        const mm     = String(now.getMonth() + 1).padStart(2, "0");
+        const yyyy   = now.getFullYear();
+        const count  = await Bill.countDocuments({});
+        const billId = `B/${mm}/${yyyy}-${String(count + 1).padStart(5, "0")}`;
+
+        // Find matching project in DB
+        const allProjects = await Project.find({ isActive: true }).lean();
+        const matched     = allProjects.find(
+          (p) => p.name.toLowerCase() === session.bill.project_name.toLowerCase()
+        );
+        const companyId = user.companies[0]?._id || user.companies[0];
+
+        const newBill = new Bill({
+          billId,
+          date:        now,
+          project:     matched?._id || null,
+          company:     companyId,
+          engineer:    user._id,
+          category:    session.bill.bill_type,
+          amount:      session.bill.bill_amount,
+          vendor:      session.bill.vendor_name,
+          remarks:     session.bill.remarks,
+          status:      "In Progress",
+          attachments: allFiles,
+        });
+
+        await newBill.save();
+
+        const fmt = session.bill.bill_amount.toLocaleString("en-IN");
+        console.log(`✅ Bill saved: ${billId}`);
+
+        const savedBill = {
+          billId,
+          project_name: session.bill.project_name,
+          bill_type:    session.bill.bill_type,
+          bill_amount:  fmt,
+          vendor_name:  session.bill.vendor_name || "—",
+          attachText,
+          totalFiles,
         };
-      }
 
-      // ── CANCEL ──
-      if (confirmation === "cancel") {
         clearSession(from);
-        sendText(from, "🚫 Bill cancelled.\n\n_Send any message to create a new bill._").catch(() => {});
+
+        sendText(from,
+          `✅ *Bill Created Successfully!*\n\n` +
+          `📝 Bill ID:   *${savedBill.billId}*\n` +
+          `🏗️ Project:  ${savedBill.project_name}\n` +
+          `📋 Category: ${savedBill.bill_type}\n` +
+          `💰 Amount:   ₹${savedBill.bill_amount}\n` +
+          `🏪 Vendor:   ${savedBill.vendor_name}\n` +
+          `📎 Files:    ${savedBill.totalFiles > 0 ? savedBill.totalFiles + " attached" : "None"}\n` +
+          `📌 Status:   In Progress\n\n` +
+          `_Send any message to create another bill._`
+        ).catch(() => {});
+
         return {
           version: "3.0", screen: "SUCCESS",
-          data: { bill_id: "Cancelled", project_name: "—", bill_type: "—", bill_amount: "0", vendor_name: "—", attachments_count: "—" },
+          data: {
+            bill_id:           savedBill.billId,
+            project_name:      savedBill.project_name,
+            bill_type:         savedBill.bill_type,
+            bill_amount:       savedBill.bill_amount,
+            vendor_name:       savedBill.vendor_name,
+            attachments_count: savedBill.attachText,
+          },
         };
-      }
 
-      // ── CONFIRM ──
-      if (confirmation === "confirm") {
-        try {
-          // 🔧 Re-fetch user if null
-          let user = session.user;
-          if (!user) user = await findUserByPhone(from);
-          if (!user) throw new Error("User not found. Please contact admin.");
-
-          // 🔧 Re-populate companies if missing
-          if (!user.companies || user.companies.length === 0) {
-            await user.populate("companies");
-          }
-          if (!user.companies || user.companies.length === 0) {
-            throw new Error("No company linked to this user. Please contact admin.");
-          }
-
-          console.log(`👤 User: ${user.name} | Companies: ${user.companies.length}`);
-
-          const billCount = await Bill.countDocuments({});
-          const now       = new Date();
-          const mm        = String(now.getMonth() + 1).padStart(2, "0");
-          const yyyy      = now.getFullYear();
-          const billId    = `B/${mm}/${yyyy}-${String(billCount + 1).padStart(5, "0")}`;
-
-          // Find matching project in DB
-          const companyIds  = user.companies.map((c) => c._id || c);
-          const allProjects = await Project.find({ isActive: true }).lean();
-          const matched     = allProjects.find(
-            (p) => p.name.toLowerCase() === session.bill.project_name.toLowerCase()
-          );
-          const companyId = user.companies[0]?._id || user.companies[0];
-
-          const newBill = new Bill({
-            billId,
-            date:        now,
-            project:     matched?._id || null,
-            company:     companyId,
-            engineer:    user._id,
-            category:    session.bill.bill_type,
-            amount:      session.bill.bill_amount,
-            vendor:      session.bill.vendor_name,
-            remarks:     session.bill.remarks,
-            status:      "In Progress",
-            attachments: allFiles,
-          });
-
-          await newBill.save();
-
-          const fmt = session.bill.bill_amount.toLocaleString("en-IN");
-          console.log(`✅ Bill saved: ${billId}`);
-
-          // Save data before clearing session
-          const savedBill = {
-            billId,
-            project_name: session.bill.project_name,
-            bill_type:    session.bill.bill_type,
-            bill_amount:  fmt,
-            vendor_name:  session.bill.vendor_name || "—",
-            totalFiles,
-            attachText,
-          };
-
-          clearSession(from);
-
-          sendText(from,
-            `✅ *Bill Created Successfully!*\n\n` +
-            `📝 Bill ID:   *${savedBill.billId}*\n` +
-            `🏗️ Project:  ${savedBill.project_name}\n` +
-            `📋 Category: ${savedBill.bill_type}\n` +
-            `💰 Amount:   ₹${savedBill.bill_amount}\n` +
-            `🏪 Vendor:   ${savedBill.vendor_name}\n` +
-            `📎 Files:    ${savedBill.totalFiles > 0 ? savedBill.totalFiles + " attached" : "None"}\n` +
-            `📌 Status:   In Progress\n\n` +
-            `_Send any message to create another bill._`
-          ).catch(() => {});
-
-          return {
-            version: "3.0", screen: "SUCCESS",
-            data: {
-              bill_id:           savedBill.billId,
-              project_name:      savedBill.project_name,
-              bill_type:         savedBill.bill_type,
-              bill_amount:       savedBill.bill_amount,
-              vendor_name:       savedBill.vendor_name,
-              attachments_count: savedBill.attachText,
-            },
-          };
-
-        } catch (err) {
-          console.error("❌ Bill save error:", err.message);
-          const af     = [...(session.bill.photo_attachments || []), ...(session.bill.document_attachments || [])];
-          const afText = af.length === 0 ? "No files" : `${af.length} file${af.length > 1 ? "s" : ""}`;
-          return {
-            version: "3.0", screen: "REVIEW",
-            data: {
-              user_name:         session.user?.name                                || "—",
-              project_name:      session.bill.project_name                         || "—",
-              bill_type:         session.bill.bill_type                            || "—",
-              bill_amount:       session.bill.bill_amount?.toLocaleString("en-IN") || "0",
-              vendor_name:       session.bill.vendor_name                          || "Not specified",
-              attachments_count: afText,
-              remarks:           session.bill.remarks                              || "None",
-              error_message:     "❌ Save failed: " + err.message,
-            },
-          };
-        }
+      } catch (err) {
+        console.error("❌ Bill save error:", err.message);
+        return {
+          version: "3.0", screen: "ADD_DOCUMENTS",
+          data: { error_message: "❌ Save failed: " + err.message },
+        };
       }
     }
   }
