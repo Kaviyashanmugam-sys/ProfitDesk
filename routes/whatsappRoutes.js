@@ -181,11 +181,17 @@ async function handleFlowAction(from, action, screen, data, session) {
     if (session.user && (!session.user.companies || session.user.companies.length === 0)) {
       await session.user.populate("companies");
     }
-    console.log(`📤 INIT | user="${session.user?.name || "NOT FOUND"}" | companies=${session.user?.companies?.length || 0}`);
+
+    // Fetch all active projects for dropdown
+    const allProjects = await Project.find({ isActive: true }).lean();
+    const projectList = allProjects.map((p) => ({ id: p.name, title: p.name }));
+    session.projectList = projectList;
+    console.log(`📋 Projects: ${projectList.length} | user="${session.user?.name || "NOT FOUND"}"`);
+
     return {
       version: "3.0",
       screen:  "BILL_FORM",
-      data:    { project_error: "", category_error: "", amount_error: "" },
+      data:    { project_list: projectList, project_error: "", category_error: "", amount_error: "" },
     };
   }
 
@@ -202,9 +208,10 @@ async function handleFlowAction(from, action, screen, data, session) {
       const amountError   = isNaN(amount) || amount <= 0         ? "Please enter a valid amount." : "";
 
       if (projectError || categoryError || amountError) {
+        const pl = session.projectList || [];
         return {
           version: "3.0", screen: "BILL_FORM",
-          data: { project_error: projectError, category_error: categoryError, amount_error: amountError },
+          data: { project_list: pl, project_error: projectError, category_error: categoryError, amount_error: amountError },
         };
       }
 
