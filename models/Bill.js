@@ -1,38 +1,61 @@
 const mongoose = require("mongoose");
 
+const attachmentSchema = new mongoose.Schema(
+  {
+    filename:     { type: String },
+    originalname: { type: String },
+    mimetype:     { type: String },
+    path:         { type: String },
+  },
+  { _id: false }
+);
+
 const billSchema = new mongoose.Schema(
   {
-    billId:   { type: String, unique: true },
-    company:  { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
-    project:  { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: false }, // ✅ false — user type panna name match aagala irundhalum save aagum
-    engineer: { type: mongoose.Schema.Types.ObjectId, ref: "User",    required: true },
+    // ── Auto-generated Bill ID: B/MM/YYYY-NNNNN ──────────────────────────────
+    billId: { type: String, unique: true, sparse: true },
+
+    // ── Relations ─────────────────────────────────────────────────────────────
+    company:  { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: false },
+    project:  { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: false },
+    engineer: { type: mongoose.Schema.Types.ObjectId, ref: "User",    required: false },
+
+    // ── Bill fields ───────────────────────────────────────────────────────────
     category: {
       type: String,
-      enum: ["Material", "Labour", "Machineries", "Others"],
+      // Accepts both enum labels AND raw IDs from ProfitDesk API
+      // e.g. "Material" or "3"
       required: true,
     },
-    amount:   { type: Number, required: true },  // ✅ amount field add panninen
-    vendor:   { type: String },
-    remarks:  { type: String },
-    attachments: [
-      {
-        filename:     String,
-        originalname: String,
-        mimetype:     String,
-        path:         String,
-      },
-    ],
+
+    amount:  { type: Number, required: true },
+
+    // supplier_id from ProfitDesk stored as vendor string
+    vendor:  { type: String, default: "" },
+
+    remarks: { type: String, default: "" },
+
+    attachments: { type: [attachmentSchema], default: [] },
+
     status: {
-      type: String,
-      enum: ["Not Started", "In Progress", "Completed"],
-      default: "In Progress",
+      type:    String,
+      enum:    ["Not Started", "In Progress", "Completed"],
+      default: "Not Started",
     },
+
     date: { type: Date, default: Date.now },
+
+    // ── WhatsApp Flow source tracking ─────────────────────────────────────────
+    source: {
+      type:    String,
+      enum:    ["whatsapp_flow", "whatsapp_chat", "web", "api"],
+      default: "api",
+    },
   },
   { timestamps: true }
 );
 
-// Auto-generate Bill ID: B/MM/YYYY-NNNNN
+// ── Auto-generate billId if not set ──────────────────────────────────────────
 billSchema.pre("save", async function (next) {
   if (!this.billId) {
     const now   = new Date();
