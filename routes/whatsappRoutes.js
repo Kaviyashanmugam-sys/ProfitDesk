@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
 
 const router = Router();
 
@@ -8,15 +9,52 @@ const PHONE_NUMBER_ID  = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN     = process.env.WHATSAPP_ACCESS_TOKEN;
 const CUSTOMER_API     = process.env.CUSTOMER_API_BASE_URL    || "https://prod.thinksoft.in/profitdesk/api/site-engineer";
 const FLOW_ID          = process.env.FLOW_ID;
+const FLOW_PRIVATE_KEY = process.env.FLOW_PRIVATE_KEY;
 const GRAPH_URL        = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}`;
 const SESSION_TTL_MS   = 30 * 60 * 1000;
 
-// ─── TEST numbers (bypass external API) ──────────────────────────────────────
-// Remove these numbers once real API is ready
-const TEST_NUMBERS = ["7904307757", "7708420110"];
+// ═════════════════════════════════════════════════════════════════════════════
+// FLOW ENCRYPTION / DECRYPTION
+// Meta sends: encrypted_flow_data, encrypted_aes_key, initial_vector
+// We must: decrypt → process → encrypt response
+// ═════════════════════════════════════════════════════════════════════════════
 
-function isTestNumber(phone) {
-  return TEST_NUMBERS.includes(phone);
+function decryptFlowRequest(body) {
+  const { encrypted_flow_data, encrypted_aes_key, initial_vector } = body;
+
+  // 1. Decrypt AES key using RSA private key (OAEP + SHA-256)
+  const privateKey = crypto.createPrivateKey(FLOW_PRIVATE_KEY);
+  const decryptedAesKey = crypto.privateDecrypt(
+    { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+    Buffer.from(encrypted_aes_key, "base64")
+  );
+
+  // 2. Decrypt flow data using AES-128-GCM
+  const iv        = Buffer.from(initial_vector, "base64");
+  const encBuf    = Buffer.from(encrypted_flow_data, "base64");
+  const tag       = encBuf.slice(-16);
+  const ciphertext = encBuf.slice(0, -16);
+
+  const decipher = crypto.createDecipheriv("aes-128-gcm", decryptedAesKey, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  const parsed    = JSON.parse(decrypted.toString("utf8"));
+
+  return { decryptedBody: parsed, aesKey: decryptedAesKey, iv };
+}
+
+function encryptFlowResponse(responseObj, aesKey, iv) {
+  // Flip IV bits
+  const flippedIv = Buffer.from(iv.map((b) => ~b & 0xff));
+
+  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, flippedIv);
+  const jsonStr = JSON.stringify(responseObj);
+
+  const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
+  const tag       = cipher.getAuthTag();
+
+  return Buffer.concat([encrypted, tag]).toString("base64");
 }
 
 // ─── Session management ───────────────────────────────────────────────────────
@@ -149,8 +187,6 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
-// ─── Send WhatsApp Flow message ───────────────────────────────────────────────
-
 async function sendFlowMessage(to, phone) {
   await axios.post(
     `${GRAPH_URL}/messages`,
@@ -169,9 +205,7 @@ async function sendFlowMessage(to, phone) {
             flow_id: FLOW_ID,
             flow_cta: "Open Bill Form",
             flow_action: "navigate",
-            flow_action_payload: {
-              screen: "BILL_FORM",
-            },
+            flow_action_payload: { screen: "BILL_FORM" },
           },
         },
       },
@@ -192,7 +226,7 @@ async function downloadMedia(mediaId) {
       responseType: "arraybuffer",
     });
     const mimeType = fileRes.headers["content-type"] || "image/jpeg";
-    const base64 = Buffer.from(fileRes.data).toString("base64");
+    const base64   = Buffer.from(fileRes.data).toString("base64");
     return `data:${mimeType};base64,${base64}`;
   } catch (err) {
     return null;
@@ -202,14 +236,7 @@ async function downloadMedia(mediaId) {
 // ─── Chat Flow steps ──────────────────────────────────────────────────────────
 
 async function stepWelcome(from, session) {
-  // ── TEST MODE: bypass external API for test numbers ───────────────────────
-  let companies;
-  if (isTestNumber(session.phone)) {
-    console.log(`[TEST MODE] Bypassing API for ${session.phone}`);
-    companies = [{ value: "1", label: "Test Company" }];
-  } else {
-    companies = await apiPost("user-company-list", { phone: session.phone });
-  }
+  const companies = await apiPost("user-company-list", { phone: session.phone });
 
   if (!companies || companies.length === 0) {
     await sendText(from, "Your number is not registered in ProfitDesk. Please contact your admin.");
@@ -217,8 +244,8 @@ async function stepWelcome(from, session) {
     return;
   }
   session.companies = companies;
-  session.step = "WELCOME";
-  const name = session.name || "there";
+  session.step      = "WELCOME";
+  const name        = session.name || "there";
 
   if (FLOW_ID) {
     await sendText(from, `Hi ${name}, Welcome to ProfitDesk!\n\nUse the form below to submit a new bill.`);
@@ -246,46 +273,26 @@ async function stepCompany(from, session) {
 }
 
 async function stepCategory(from, session) {
-  let categories;
-  if (isTestNumber(session.phone)) {
-    categories = [
-      { value: "1", label: "Material" },
-      { value: "2", label: "Manpower" },
-      { value: "3", label: "Equipment" },
-      { value: "4", label: "Others" },
-    ];
-  } else {
-    categories = await apiPost("category-list", { phone: session.phone });
-  }
-
+  const categories = await apiPost("category-list", { phone: session.phone });
   if (!categories || categories.length === 0) {
     await sendText(from, "No categories found. Please contact admin.");
     clearSession(from);
     return;
   }
   session.categories = categories;
-  session.step = "CATEGORY";
+  session.step       = "CATEGORY";
   await sendMenu(from, "Select bill category:", "Select Category", categories);
 }
 
 async function stepProject(from, session) {
-  let projects;
-  if (isTestNumber(session.phone)) {
-    projects = [
-      { value: "1", label: "Site A" },
-      { value: "2", label: "Site B" },
-    ];
-  } else {
-    projects = await apiPost("user-project-list", { phone: session.phone });
-  }
-
+  const projects = await apiPost("user-project-list", { phone: session.phone });
   if (!projects || projects.length === 0) {
     await sendText(from, "No projects found. Please contact admin.");
     clearSession(from);
     return;
   }
   session.projects = projects;
-  session.step = "PROJECT";
+  session.step     = "PROJECT";
   await sendMenu(from, "Select your project:", "Select Project", projects);
 }
 
@@ -298,20 +305,11 @@ async function stepAmount(from, session) {
 }
 
 async function stepVendor(from, session) {
-  let vendors;
-  if (isTestNumber(session.phone)) {
-    vendors = [
-      { value: "1", label: "ABC Traders" },
-      { value: "2", label: "XYZ Suppliers" },
-    ];
-  } else {
-    vendors = await apiPost("vendor-list", {
-      phone: session.phone,
-      company_id: session.company_id,
-      category_id: session.category_id,
-    });
-  }
-
+  const vendors = await apiPost("vendor-list", {
+    phone:       session.phone,
+    company_id:  session.company_id,
+    category_id: session.category_id,
+  });
   if (!vendors || vendors.length === 0) {
     session.supplier_id    = 0;
     session.supplier_label = "-";
@@ -319,7 +317,7 @@ async function stepVendor(from, session) {
     return;
   }
   session.vendors = vendors;
-  session.step = "VENDOR";
+  session.step    = "VENDOR";
   await sendMenu(from, "Select vendor / supplier:", "Select Vendor", vendors);
 }
 
@@ -345,25 +343,18 @@ async function stepSubmit(from, session) {
   const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
 
   try {
-    // ── TEST MODE: skip real API submit ───────────────────────────────────
-    let result;
-    if (isTestNumber(session.phone)) {
-      console.log(`[TEST MODE] Skipping bill-submit API for ${session.phone}`);
-      result = { ref_bill_no: `TEST/06/2026-00001` };
-    } else {
-      result = await apiPost("bill-submit", {
-        phone:       session.phone,
-        company_id:  session.company_id,
-        date,
-        on_time:     time,
-        project_id:  session.project_id,
-        supplier_id: session.supplier_id,
-        category_id: session.category_id,
-        amount:      session.amount,
-        remarks:     session.remarks || "",
-        item:        JSON.stringify(session.files),
-      });
-    }
+    const result = await apiPost("bill-submit", {
+      phone:       session.phone,
+      company_id:  session.company_id,
+      date,
+      on_time:     time,
+      project_id:  session.project_id,
+      supplier_id: session.supplier_id,
+      category_id: session.category_id,
+      amount:      session.amount,
+      remarks:     session.remarks || "",
+      item:        JSON.stringify(session.files),
+    });
 
     if (result) {
       await sendText(
@@ -417,52 +408,29 @@ async function handleMessage(from, message, contactName) {
 
   if (message.type === "interactive") {
     const interactive = message.interactive;
-    let selectedId = "";
+    let selectedId    = "";
+    if (interactive.type === "button_reply") selectedId = interactive.button_reply.id;
+    else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
 
-    if (interactive.type === "button_reply") {
-      selectedId = interactive.button_reply.id;
-    } else if (interactive.type === "list_reply") {
-      selectedId = interactive.list_reply.id;
-    }
-
-    if (session.step === "WELCOME" && selectedId === "create_bill") {
-      await stepCompany(from, session);
-      return;
-    }
+    if (session.step === "WELCOME" && selectedId === "create_bill") { await stepCompany(from, session); return; }
     if (session.step === "COMPANY") {
       const picked = session.companies.find((c) => String(c.value) === selectedId);
-      if (picked) {
-        session.company_id    = picked.value;
-        session.company_label = picked.label;
-        await stepCategory(from, session);
-      }
+      if (picked) { session.company_id = picked.value; session.company_label = picked.label; await stepCategory(from, session); }
       return;
     }
     if (session.step === "CATEGORY") {
       const picked = session.categories.find((c) => String(c.value) === selectedId);
-      if (picked) {
-        session.category_id    = picked.value;
-        session.category_label = picked.label;
-        await stepProject(from, session);
-      }
+      if (picked) { session.category_id = picked.value; session.category_label = picked.label; await stepProject(from, session); }
       return;
     }
     if (session.step === "PROJECT") {
       const picked = session.projects.find((p) => String(p.value) === selectedId);
-      if (picked) {
-        session.project_id    = picked.value;
-        session.project_label = picked.label;
-        await stepAmount(from, session);
-      }
+      if (picked) { session.project_id = picked.value; session.project_label = picked.label; await stepAmount(from, session); }
       return;
     }
     if (session.step === "VENDOR") {
       const picked = session.vendors.find((v) => String(v.value) === selectedId);
-      if (picked) {
-        session.supplier_id    = picked.value;
-        session.supplier_label = picked.label;
-        await stepRemarks(from, session);
-      }
+      if (picked) { session.supplier_id = picked.value; session.supplier_label = picked.label; await stepRemarks(from, session); }
       return;
     }
     return;
@@ -471,77 +439,40 @@ async function handleMessage(from, message, contactName) {
   const text  = String((message.text && message.text.body) || "").trim();
   const lower = text.toLowerCase();
 
-  if (lower === "cancel") {
-    clearSession(from);
-    await sendText(from, "Session cancelled. Send hi to start again.");
-    return;
-  }
+  if (lower === "cancel") { clearSession(from); await sendText(from, "Session cancelled. Send hi to start again."); return; }
 
   switch (session.step) {
-    case "START": {
-      if (["hi", "hello", "hey", "hii", "hai", "helo"].includes(lower)) {
-        await stepWelcome(from, session);
-      } else {
-        await sendText(from, "Send hi to get started with ProfitDesk.");
-      }
+    case "START":
+      if (["hi", "hello", "hey", "hii", "hai", "helo"].includes(lower)) await stepWelcome(from, session);
+      else await sendText(from, "Send hi to get started with ProfitDesk.");
       break;
-    }
-
-    case "WELCOME": {
+    case "WELCOME":
       if (["hi", "hello", "hey"].includes(lower)) {
         const name = session.name || "there";
-        await sendButtons(
-          from,
-          `Hi ${name}, Welcome to ProfitDesk!\n\nClick below to create a new bill.`,
-          [{ id: "create_bill", title: "Create Bill" }]
-        );
+        await sendButtons(from, `Hi ${name}, Welcome to ProfitDesk!\n\nClick below to create a new bill.`, [{ id: "create_bill", title: "Create Bill" }]);
       }
       break;
-    }
-
-    case "FLOW_SENT": {
-      if (["hi", "hello"].includes(lower)) {
-        await sendText(from, "Please complete the bill form that was sent to you.");
-      } else {
-        await sendText(from, "Please fill the bill form above. Type cancel to restart.");
-      }
+    case "FLOW_SENT":
+      if (["hi", "hello"].includes(lower)) await sendText(from, "Please complete the bill form that was sent to you.");
+      else await sendText(from, "Please fill the bill form above. Type cancel to restart.");
       break;
-    }
-
     case "AMOUNT": {
       const amount = parseFloat(text.replace(/,/g, ""));
-      if (isNaN(amount) || amount <= 0) {
-        await sendText(from, "Please enter a valid amount (numbers only).\nExample: 5000");
-      } else {
-        session.amount = amount;
-        await stepVendor(from, session);
-      }
+      if (isNaN(amount) || amount <= 0) await sendText(from, "Please enter a valid amount (numbers only).\nExample: 5000");
+      else { session.amount = amount; await stepVendor(from, session); }
       break;
     }
-
-    case "REMARKS": {
+    case "REMARKS":
       session.remarks = lower === "skip" ? "" : text;
       await stepPhoto(from, session);
       break;
-    }
-
-    case "PHOTO": {
-      if (lower === "done") {
-        await stepSubmit(from, session);
-      } else {
-        await sendText(from, "Send a file or type done to submit the bill.");
-      }
+    case "PHOTO":
+      if (lower === "done") await stepSubmit(from, session);
+      else await sendText(from, "Send a file or type done to submit the bill.");
       break;
-    }
-
-    default: {
-      if (["hi", "hello"].includes(lower)) {
-        clearSession(from);
-        await stepWelcome(from, getSession(from, contactName));
-      } else {
-        await sendText(from, "Send hi to get started.");
-      }
-    }
+    default:
+      if (["hi", "hello"].includes(lower)) { clearSession(from); await stepWelcome(from, getSession(from, contactName)); }
+      else await sendText(from, "Send hi to get started.");
   }
 }
 
@@ -550,82 +481,79 @@ async function handleMessage(from, message, contactName) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 router.post("/flow", async (req, res) => {
-  const { screen, data = {}, flow_token } = req.body;
-  const phone = flow_token;
-
-  console.log(`\n📋 Flow webhook | screen=${screen || "INIT"} | phone=${phone}`);
+  console.log(`\n📋 Flow webhook hit | keys=${Object.keys(req.body).join(",")}`);
 
   try {
+    // ── Decrypt incoming request ────────────────────────────────────────────
+    let decryptedBody, aesKey, iv;
+    try {
+      const result  = decryptFlowRequest(req.body);
+      decryptedBody = result.decryptedBody;
+      aesKey        = result.aesKey;
+      iv            = result.iv;
+    } catch (decErr) {
+      console.error("[Flow] Decrypt error:", decErr.message);
+      return res.status(421).send("Decryption failed");
+    }
+
+    const { screen, data = {}, flow_token, version, action } = decryptedBody;
+    const phone = flow_token;
+
+    console.log(`📋 screen=${screen || "INIT"} | action=${action} | phone=${phone}`);
+
+    // Helper: encrypt and send response
+    const reply = (responseObj) => {
+      const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
+      return res.send(encrypted);
+    };
+
+    // ── PING (health check) ─────────────────────────────────────────────────
+    if (action === "ping") {
+      return reply({ data: { status: "active" } });
+    }
 
     // ── INIT: Flow opened → load dropdowns ─────────────────────────────────
-    if (!screen || screen === "INIT") {
-
-      // TEST MODE: skip company check for test numbers
-      if (!isTestNumber(phone)) {
-        const companyCheck = await apiPost("user-company-enable", { phone });
-        if (!companyCheck) {
-          return res.json({
-            screen: "BILL_FORM",
-            data: {
-              categories:    [{ id: "err", title: "No company found" }],
-              projects:      [{ id: "err", title: "No project found" }],
-              vendors:       [{ id: "0",   title: "None" }],
-              error_message: "Your account is not active. Contact admin.",
-            },
-          });
-        }
+    if (action === "INIT" || !screen || screen === "INIT") {
+      const companyCheck = await apiPost("user-company-enable", { phone });
+      if (!companyCheck) {
+        return reply({
+          screen: "BILL_FORM",
+          data: {
+            categories:    [{ id: "err", title: "No company found" }],
+            projects:      [{ id: "err", title: "No project found" }],
+            vendors:       [{ id: "0",   title: "None" }],
+            error_message: "Your account is not active. Contact admin.",
+          },
+        });
       }
 
-      let categories, projects, vendors;
+      const [categoryRes, projectRes, vendorRes] = await Promise.all([
+        apiPost("category-list",     { phone }),
+        apiPost("user-project-list", { phone }),
+        apiPost("vendor-list",       { phone }),
+      ]);
 
-      if (isTestNumber(phone)) {
-        // ── TEST DATA ───────────────────────────────────────────────────────
-        console.log(`[TEST MODE] Returning mock dropdown data for ${phone}`);
-        categories = [
-          { id: "1", title: "Material" },
-          { id: "2", title: "Manpower" },
-          { id: "3", title: "Equipment" },
-          { id: "4", title: "Others" },
-        ];
-        projects = [
-          { id: "1", title: "Site A" },
-          { id: "2", title: "Site B" },
-        ];
-        vendors = [
-          { id: "0",  title: "None" },
-          { id: "1",  title: "ABC Traders" },
-          { id: "2",  title: "XYZ Suppliers" },
-        ];
-      } else {
-        // ── REAL API ────────────────────────────────────────────────────────
-        const [categoryRes, projectRes, vendorRes] = await Promise.all([
-          apiPost("category-list",     { phone }),
-          apiPost("user-project-list", { phone }),
-          apiPost("user-company-list", { phone }),
-        ]);
+      const categories = (categoryRes || []).map((c) => ({
+        id:    String(c.id    || c.value || c.category_id),
+        title: String(c.name  || c.label || c.category_name || c.title),
+      }));
 
-        categories = (categoryRes || []).map((c) => ({
-          id:    String(c.id    || c.value || c.category_id),
-          title: String(c.name  || c.label || c.category_name || c.title),
-        }));
+      const projects = (projectRes || []).map((p) => ({
+        id:    String(p.id    || p.value || p.project_id),
+        title: String(p.name  || p.label || p.project_name || p.title),
+      }));
 
-        projects = (projectRes || []).map((p) => ({
-          id:    String(p.id    || p.value || p.project_id),
-          title: String(p.name  || p.label || p.project_name || p.title),
-        }));
+      const vendors = [
+        { id: "0", title: "None" },
+        ...(vendorRes || []).map((v) => ({
+          id:    String(v.id    || v.value || v.vendor_id || v.supplier_id),
+          title: String(v.name  || v.label || v.vendor_name || v.title),
+        })),
+      ];
 
-        vendors = [
-          { id: "0", title: "None" },
-          ...(vendorRes || []).map((v) => ({
-            id:    String(v.id    || v.value || v.company_id),
-            title: String(v.name  || v.label || v.company_name || v.title),
-          })),
-        ];
-      }
-
-      return res.json({
+      return reply({
         screen: "BILL_FORM",
-        data: { categories, projects, vendors, error_message: "" },
+        data:   { categories, projects, vendors, error_message: "" },
       });
     }
 
@@ -634,19 +562,13 @@ router.post("/flow", async (req, res) => {
       const { category, project, amount, vendor, remarks } = data;
 
       if (!category || !project || !amount) {
-        return res.json({
-          screen: "BILL_FORM",
-          data: { error_message: "Category, Project and Amount are required." },
-        });
+        return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
       }
       if (isNaN(Number(amount)) || Number(amount) <= 0) {
-        return res.json({
-          screen: "BILL_FORM",
-          data: { error_message: "Please enter a valid amount." },
-        });
+        return reply({ screen: "BILL_FORM", data: { error_message: "Please enter a valid amount." } });
       }
 
-      return res.json({
+      return reply({
         screen: "ADD_PHOTOS",
         data: {
           error_message: "",
@@ -662,8 +584,7 @@ router.post("/flow", async (req, res) => {
     // ── ADD_PHOTOS → ADD_DOCUMENTS ───────────────────────────────────────────
     if (screen === "ADD_PHOTOS") {
       const { category, project, vendor, amount, remarks, photos } = data;
-
-      return res.json({
+      return reply({
         screen: "ADD_DOCUMENTS",
         data: {
           error_message: "",
@@ -685,46 +606,29 @@ router.post("/flow", async (req, res) => {
       const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
       const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
 
-      let submitResult;
-
-      if (isTestNumber(phone)) {
-        // ── TEST MODE: mock submit ──────────────────────────────────────────
-        console.log(`[TEST MODE] Mock bill submit for ${phone}`);
-        submitResult = {
-          ref_bill_no: `TEST/06/2026-00001`,
-          category_id: category,
-          project_id:  project,
-          supplier_id: vendor || "0",
-        };
-      } else {
-        // ── REAL API submit ─────────────────────────────────────────────────
-        submitResult = await apiPost("bill-submit", {
-          phone,
-          date,
-          on_time:     time,
-          category_id: category,
-          project_id:  project,
-          supplier_id: (!vendor || vendor === "0") ? 0 : vendor,
-          amount:      Number(amount),
-          remarks:     remarks || "",
-          item:        JSON.stringify([
-            ...(Array.isArray(photos)    ? photos    : []),
-            ...(Array.isArray(documents) ? documents : []),
-          ]),
-        });
-      }
+      const submitResult = await apiPost("bill-submit", {
+        phone,
+        date,
+        on_time:     time,
+        category_id: category,
+        project_id:  project,
+        supplier_id: (!vendor || vendor === "0") ? 0 : vendor,
+        amount:      Number(amount),
+        remarks:     remarks || "",
+        item: JSON.stringify([
+          ...(Array.isArray(photos)    ? photos    : []),
+          ...(Array.isArray(documents) ? documents : []),
+        ]),
+      });
 
       if (!submitResult) {
-        return res.json({
-          screen: "ADD_DOCUMENTS",
-          data: { error_message: "Submission failed. Please try again." },
-        });
+        return reply({ screen: "ADD_DOCUMENTS", data: { error_message: "Submission failed. Please try again." } });
       }
 
       const bill       = submitResult;
       const filesCount = (photos?.length || 0) + (documents?.length || 0);
 
-      // ── Save to MongoDB (non-fatal) ───────────────────────────────────────
+      // Save to MongoDB
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
@@ -740,10 +644,10 @@ router.post("/flow", async (req, res) => {
           attachments: [],
         });
       } catch (dbErr) {
-        console.warn("[Flow] MongoDB Bill save skipped:", dbErr.message);
+        console.warn("[Flow] MongoDB save skipped:", dbErr.message);
       }
 
-      return res.json({
+      return reply({
         screen: "SUCCESS",
         data: {
           ref_bill_no: bill.ref_bill_no || bill.bill_no || "—",
@@ -756,14 +660,11 @@ router.post("/flow", async (req, res) => {
       });
     }
 
-    return res.status(400).json({ error: `Unknown screen: ${screen}` });
+    return res.status(400).send("Unknown screen");
 
   } catch (err) {
     console.error("[Flow] Error:", err?.response?.data || err.message);
-    return res.status(500).json({
-      screen: screen || "BILL_FORM",
-      data: { error_message: "Server error. Please try again later." },
-    });
+    return res.status(500).send("Server error");
   }
 });
 
@@ -773,18 +674,14 @@ router.get("/whatsapp", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).send("Forbidden");
-  }
+  if (mode === "subscribe" && token === VERIFY_TOKEN) res.status(200).send(challenge);
+  else res.status(403).send("Forbidden");
 });
 
 // ─── Receive WhatsApp messages ────────────────────────────────────────────────
 
 router.post("/whatsapp", (req, res) => {
   res.sendStatus(200);
-
   const body = req.body;
   if (body.object !== "whatsapp_business_account") return;
 
@@ -794,17 +691,10 @@ router.post("/whatsapp", (req, res) => {
         const value    = change.value;
         const messages = value.messages;
         if (!messages || messages.length === 0) continue;
-
-        const contacts    = value.contacts;
-        const contactName = contacts?.[0]?.profile?.name || "";
-
+        const contactName = value.contacts?.[0]?.profile?.name || "";
         for (const message of messages) {
-          const from = message.from;
-          try {
-            await handleMessage(from, message, contactName);
-          } catch (err) {
-            console.error("WhatsApp handler error:", err);
-          }
+          try { await handleMessage(message.from, message, contactName); }
+          catch (err) { console.error("WhatsApp handler error:", err); }
         }
       }
     }
