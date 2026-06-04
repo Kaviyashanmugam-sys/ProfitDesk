@@ -22,15 +22,13 @@ const billSchema = new mongoose.Schema(
 
     // ── Bill fields ───────────────────────────────────────────────────────────
     category: {
-      type: String,
-      // Accepts both enum labels AND raw IDs from ProfitDesk API
-      // e.g. "Material" or "3"
+      type:     String,
       required: true,
     },
 
     amount:  { type: Number, required: true },
 
-    // supplier_id from ProfitDesk stored as vendor string
+    // ✅ FIX #2: vendor is String — always pass clean string, not number/object
     vendor:  { type: String, default: "" },
 
     remarks: { type: String, default: "" },
@@ -45,7 +43,8 @@ const billSchema = new mongoose.Schema(
 
     date: { type: Date, default: Date.now },
 
-    // ── WhatsApp Flow source tracking ─────────────────────────────────────────
+    // ── Source tracking ───────────────────────────────────────────────────────
+    // ✅ FIX #3: whatsappRoutes now passes source: "whatsapp_flow" correctly
     source: {
       type:    String,
       enum:    ["whatsapp_flow", "whatsapp_chat", "web", "api"],
