@@ -257,30 +257,36 @@ async function sendMenu(to, bodyText, label, items) {
 
 async function sendFlowMessage(to, flowToken) {
   console.log(`[sendFlowMessage] to=${to} | flow_token=${flowToken} | FLOW_ID=${FLOW_ID}`);
-  await axios.post(
-    `${GRAPH_URL}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "flow",
-        body: { text: "Create a new bill using the form below." },
-        action: {
-          name: "flow",
-          parameters: {
-            flow_message_version: "3",
-            flow_token:           flowToken,
-            flow_id:              FLOW_ID,
-            flow_cta:             "Open Bill Form",
-            flow_action:          "navigate",
-            flow_action_payload:  { screen: "BILL_FORM", data: {} },  // ✅ data:{} required for INIT
+  try {
+    await axios.post(
+      `${GRAPH_URL}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "flow",
+          body: { text: "Create a new bill using the form below." },
+          action: {
+            name: "flow",
+            parameters: {
+              flow_message_version: "3",
+              flow_token:           flowToken,
+              flow_id:              FLOW_ID,
+              flow_cta:             "Open Bill Form",
+              flow_action:          "navigate",
+              flow_action_payload:  { screen: "BILL_FORM", data: {} },
+            },
           },
         },
       },
-    },
-    { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-  );
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
+    console.log(`[sendFlowMessage] ✅ sent successfully`);
+  } catch (err) {
+    console.error(`[sendFlowMessage] ❌ status=${err.response?.status}`);
+    console.error(`[sendFlowMessage] ❌ error=`, JSON.stringify(err.response?.data, null, 2));
+  }
 }
 
 async function downloadMedia(mediaId) {
@@ -549,7 +555,7 @@ async function handleMessage(from, message, contactName) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ⭐ WHATSAPP FLOW WEBHOOK — POST /webhook/flow
+// WHATSAPP FLOW WEBHOOK — POST /webhook/flow
 // ═════════════════════════════════════════════════════════════════════════════
 
 router.post("/flow", async (req, res) => {
@@ -605,9 +611,9 @@ router.post("/flow", async (req, res) => {
       console.log(`[Flow INIT] using company_id: ${companyId}`);
 
       const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+        apiPostWithPhoneFallback("category-list",     {},                                              rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                      rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 },      rawPhone),
       ]);
 
       console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
