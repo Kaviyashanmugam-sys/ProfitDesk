@@ -279,6 +279,15 @@ async function sendFlowMessage(to, flowToken) {
               flow_id:              FLOW_ID,
               flow_cta:             "Open Bill Form",
               flow_action:          "navigate",
+              flow_action_payload:  {
+                screen: "BILL_FORM",
+                data: {
+                  categories:    [{ id: "0", title: "Loading..." }],
+                  projects:      [{ id: "0", title: "Loading..." }],
+                  vendors:       [{ id: "0", title: "None" }],
+                  error_message: "",
+                },
+              },
             },
           },
         },
@@ -590,74 +599,35 @@ router.post("/flow", async (req, res) => {
       return reply({ data: { status: "active" } });
     }
 
-    // ── INIT ─────────────────────────────────────────────────────────────────
-    // WhatsApp sends action="INIT" on first open (screen may be "BILL_FORM" or absent)
+    // ── INIT (navigate mode — WhatsApp sends INIT but we handle via BILL_FORM) ─
     if (action === "INIT") {
-      console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
-
-      // ── Step 1: Get companies ──────────────────────────────────────────────
-      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      console.log(`[Flow INIT] companies: ${JSON.stringify(companyRes)}`);
-
-      if (!companyRes || companyRes.length === 0) {
-        return reply({
-          screen: "BILL_FORM",
-          data: {
-            categories:    [{ id: "err", title: "Not registered" }],
-            projects:      [{ id: "err", title: "Not registered" }],
-            vendors:       [{ id: "0",   title: "None" }],
-            error_message: "Your account is not active. Contact admin.",
-          },
-        });
-      }
-
-      const company   = companyRes[0];
-      const companyId = String(company.value != null ? company.value : company.id);
-      console.log(`[Flow INIT] using company_id: ${companyId}`);
-
-      // ── Step 2: Fetch categories, projects, vendors in parallel ───────────
-      // NOTE: vendor-list called without category_id — fetch all vendors for company
-      const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                              rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },       rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId },       rawPhone),
-      ]);
-
-      console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
-      console.log(`[Flow INIT] projects:   ${JSON.stringify(projectRes)}`);
-      console.log(`[Flow INIT] vendors:    ${JSON.stringify(vendorRes)}`);
-
-      const categories = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-      const projects   = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-
-      const vendorItems = Array.isArray(vendorRes)
-        ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem)
-        : [];
-      const vendors = [{ id: "0", title: "None" }, ...vendorItems];
-
-      if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-      if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-
-      console.log(`[Flow INIT] → ${categories.length} cats | ${projects.length} projs | ${vendors.length} vendors`);
-
-      // ── Step 3: Cache labels for SUCCESS screen ───────────────────────────
-      flowDataCache.set(rawPhone, { categories, projects, vendors });
-
-      return reply({
-        screen: "BILL_FORM",
-        data:   { categories, projects, vendors, error_message: "" },
-      });
+      console.log(`[Flow INIT] action=INIT received, delegating to BILL_FORM handler`);
+      // Fall through to BILL_FORM handler below
     }
 
     // ── BILL_FORM → ADD_PHOTOS ────────────────────────────────────────────────
     if (screen === "BILL_FORM") {
       const { category, project, amount, vendor, remarks } = data;
 
+      // ── First open: category/project/amount all empty → fetch dropdowns ───
+      if (!category && !project && !amount) {
+        console.log(`[Flow BILL_FORM] First open — fetching dropdowns for ${rawPhone}`);
+        const dropdowns = await refetchDropdownsForPhone(rawPhone);
+        console.log(`[Flow BILL_FORM] → ${dropdowns.categories.length} cats | ${dropdowns.projects.length} projs | ${dropdowns.vendors.length} vendors`);
+        return reply({
+          screen: "BILL_FORM",
+          data: {
+            ...dropdowns,
+            error_message: "",
+          },
+        });
+      }
+
+      // ── Validation ────────────────────────────────────────────────────────
       if (!category || !project || !amount) {
         return reply({
           screen: "BILL_FORM",
-          data:   {
-            // Re-fetch dropdowns so they stay populated on validation error
+          data: {
             ...(await refetchDropdownsForPhone(rawPhone)),
             error_message: "Category, Project and Amount are required.",
           },
@@ -666,7 +636,7 @@ router.post("/flow", async (req, res) => {
       if (isNaN(Number(amount)) || Number(amount) <= 0) {
         return reply({
           screen: "BILL_FORM",
-          data:   {
+          data: {
             ...(await refetchDropdownsForPhone(rawPhone)),
             error_message: "Please enter a valid amount.",
           },
