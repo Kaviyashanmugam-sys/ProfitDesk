@@ -92,13 +92,13 @@ function encryptFlowResponse(responseObj, aesKey, iv) {
 
 function toDropdownItem(item) {
   const id = String(
-    item.id          ||
-    item.value       ||
-    item.category_id ||
-    item.project_id  ||
-    item.vendor_id   ||
-    item.supplier_id ||
-    item.company_id  ||
+    item.id          != null ? item.id          :
+    item.value       != null ? item.value       :
+    item.category_id != null ? item.category_id :
+    item.project_id  != null ? item.project_id  :
+    item.vendor_id   != null ? item.vendor_id   :
+    item.supplier_id != null ? item.supplier_id :
+    item.company_id  != null ? item.company_id  :
     ""
   );
   const title = String(
@@ -115,7 +115,9 @@ function toDropdownItem(item) {
   return { id, title };
 }
 
-// ─── Session management ───────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// SESSION MANAGEMENT
+// ═════════════════════════════════════════════════════════════════════════════
 
 const sessions = new Map();
 
@@ -158,7 +160,9 @@ function clearSession(from) {
   sessions.delete(from);
 }
 
-// ─── External API ─────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// EXTERNAL API
+// ═════════════════════════════════════════════════════════════════════════════
 
 async function apiPost(endpoint, body) {
   try {
@@ -177,7 +181,9 @@ async function apiPost(endpoint, body) {
   }
 }
 
-// ─── WhatsApp senders ─────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// WHATSAPP SENDERS
+// ═════════════════════════════════════════════════════════════════════════════
 
 async function sendText(to, text) {
   await axios.post(
@@ -296,7 +302,9 @@ async function downloadMedia(mediaId) {
   }
 }
 
-// ─── Chat Flow steps ──────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// CHAT FLOW STEPS
+// ═════════════════════════════════════════════════════════════════════════════
 
 async function stepWelcome(from, session) {
   const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
@@ -441,7 +449,9 @@ async function stepSubmit(from, session) {
   clearSession(from);
 }
 
-// ─── Main chat message handler ────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// MAIN CHAT MESSAGE HANDLER
+// ═════════════════════════════════════════════════════════════════════════════
 
 async function handleMessage(from, message, contactName) {
   const session = getSession(from, contactName);
@@ -471,7 +481,7 @@ async function handleMessage(from, message, contactName) {
   if (message.type === "interactive") {
     const interactive = message.interactive;
     let selectedId    = "";
-    if (interactive.type === "button_reply")   selectedId = interactive.button_reply.id;
+    if (interactive.type === "button_reply")    selectedId = interactive.button_reply.id;
     else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
 
     if (session.step === "WELCOME" && selectedId === "create_bill") { await stepCompany(from, session); return; }
@@ -575,10 +585,11 @@ router.post("/flow", async (req, res) => {
     if (action === "INIT" || !screen || screen === "INIT") {
       console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
 
-      const companyCheck = await apiPostWithPhoneFallback("user-company-enable", {}, rawPhone);
-      console.log(`[Flow INIT] companyCheck: ${JSON.stringify(companyCheck)}`);
+      // STEP 1: Get company list first — needed for company_id
+      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+      console.log(`[Flow INIT] companies: ${JSON.stringify(companyRes)}`);
 
-      if (!companyCheck) {
+      if (!companyRes || companyRes.length === 0) {
         return reply({
           screen: "BILL_FORM",
           data: {
@@ -590,10 +601,16 @@ router.post("/flow", async (req, res) => {
         });
       }
 
+      // STEP 2: Pick first company
+      const company   = companyRes[0];
+      const companyId = Number(company.value != null ? company.value : company.id);
+      console.log(`[Flow INIT] using company_id: ${companyId}`);
+
+      // STEP 3: Fetch all dropdowns in parallel — pass company_id where needed
       const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {}, rawPhone),
-        apiPostWithPhoneFallback("user-project-list", {}, rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       {}, rawPhone),
+        apiPostWithPhoneFallback("category-list",     {},                                              rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                      rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 },      rawPhone),
       ]);
 
       console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
@@ -602,10 +619,12 @@ router.post("/flow", async (req, res) => {
 
       const categories = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
       const projects   = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-      const vendors    = [
-        { id: "0", title: "None" },
-        ...(Array.isArray(vendorRes) ? vendorRes.map(toDropdownItem) : []),
-      ];
+
+      // Filter out "Add New" (value: 0) from vendors — not useful in flow dropdown
+      const vendorItems = Array.isArray(vendorRes)
+        ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem)
+        : [];
+      const vendors = [{ id: "0", title: "None" }, ...vendorItems];
 
       if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
       if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
@@ -623,10 +642,16 @@ router.post("/flow", async (req, res) => {
       const { category, project, amount, vendor, remarks } = data;
 
       if (!category || !project || !amount) {
-        return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
+        return reply({
+          screen: "BILL_FORM",
+          data:   { error_message: "Category, Project and Amount are required." },
+        });
       }
       if (isNaN(Number(amount)) || Number(amount) <= 0) {
-        return reply({ screen: "BILL_FORM", data: { error_message: "Please enter a valid amount." } });
+        return reply({
+          screen: "BILL_FORM",
+          data:   { error_message: "Please enter a valid amount." },
+        });
       }
 
       return reply({
@@ -667,27 +692,33 @@ router.post("/flow", async (req, res) => {
       const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
       const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
 
+      const allFiles = [
+        ...(Array.isArray(photos)    ? photos    : []),
+        ...(Array.isArray(documents) ? documents : []),
+      ];
+
       const submitResult = await apiPostWithPhoneFallback("bill-submit", {
         date,
         on_time:     time,
         category_id: category,
         project_id:  project,
-        supplier_id: (!vendor || vendor === "0") ? 0 : vendor,
+        supplier_id: (!vendor || vendor === "0") ? 0 : Number(vendor),
         amount:      Number(amount),
         remarks:     remarks || "",
-        item: JSON.stringify([
-          ...(Array.isArray(photos)    ? photos    : []),
-          ...(Array.isArray(documents) ? documents : []),
-        ]),
+        item:        JSON.stringify(allFiles),
       }, rawPhone);
 
       if (!submitResult) {
-        return reply({ screen: "ADD_DOCUMENTS", data: { error_message: "Submission failed. Please try again." } });
+        return reply({
+          screen: "ADD_DOCUMENTS",
+          data:   { error_message: "Submission failed. Please try again." },
+        });
       }
 
       const bill       = submitResult;
-      const filesCount = (photos?.length || 0) + (documents?.length || 0);
+      const filesCount = allFiles.length;
 
+      // Optional: save to local MongoDB (non-blocking)
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
@@ -709,9 +740,9 @@ router.post("/flow", async (req, res) => {
       return reply({
         screen: "SUCCESS",
         data: {
-          ref_bill_no: bill.ref_bill_no || bill.bill_no || "—",
-          category:    bill.category_id  || category,
-          project:     bill.project_id   || project,
+          ref_bill_no: String(bill.ref_bill_no || bill.bill_no || "—"),
+          category:    String(bill.category_id  || category),
+          project:     String(bill.project_id   || project),
           amount:      Number(amount).toLocaleString("en-IN"),
           vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
           files_count: `${filesCount} file(s)`,
@@ -727,7 +758,9 @@ router.post("/flow", async (req, res) => {
   }
 });
 
-// ─── Webhook verification ─────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// WEBHOOK VERIFICATION — GET /webhook/whatsapp
+// ═════════════════════════════════════════════════════════════════════════════
 
 router.get("/whatsapp", (req, res) => {
   const mode      = req.query["hub.mode"];
@@ -737,7 +770,9 @@ router.get("/whatsapp", (req, res) => {
   else res.status(403).send("Forbidden");
 });
 
-// ─── Receive WhatsApp messages ────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// RECEIVE WHATSAPP MESSAGES — POST /webhook/whatsapp
+// ═════════════════════════════════════════════════════════════════════════════
 
 router.post("/whatsapp", (req, res) => {
   res.sendStatus(200);
