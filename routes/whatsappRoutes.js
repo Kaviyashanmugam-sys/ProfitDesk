@@ -273,7 +273,7 @@ async function sendFlowMessage(to, flowToken) {
             flow_token:           flowToken,
             flow_id:              FLOW_ID,
             flow_cta:             "Open Bill Form",
-            flow_action:          "navigate",
+            flow_action:          "data_exchange",        // ✅ Fixed: navigate → data_exchange
             flow_action_payload:  { screen: "BILL_FORM" },
           },
         },
@@ -585,7 +585,6 @@ router.post("/flow", async (req, res) => {
     if (action === "INIT" || !screen || screen === "INIT") {
       console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
 
-      // STEP 1: Get company list first — needed for company_id
       const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
       console.log(`[Flow INIT] companies: ${JSON.stringify(companyRes)}`);
 
@@ -601,16 +600,14 @@ router.post("/flow", async (req, res) => {
         });
       }
 
-      // STEP 2: Pick first company
       const company   = companyRes[0];
       const companyId = Number(company.value != null ? company.value : company.id);
       console.log(`[Flow INIT] using company_id: ${companyId}`);
 
-      // STEP 3: Fetch all dropdowns in parallel — pass company_id where needed
       const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                              rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                      rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 },      rawPhone),
+        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
       ]);
 
       console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
@@ -620,7 +617,6 @@ router.post("/flow", async (req, res) => {
       const categories = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
       const projects   = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
 
-      // Filter out "Add New" (value: 0) from vendors — not useful in flow dropdown
       const vendorItems = Array.isArray(vendorRes)
         ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem)
         : [];
@@ -718,7 +714,6 @@ router.post("/flow", async (req, res) => {
       const bill       = submitResult;
       const filesCount = allFiles.length;
 
-      // Optional: save to local MongoDB (non-blocking)
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
