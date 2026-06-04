@@ -7,13 +7,15 @@ const router = Router();
 const VERIFY_TOKEN    = process.env.WHATSAPP_VERIFY_TOKEN    || "profitdesk_verify_token";
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN    = process.env.WHATSAPP_ACCESS_TOKEN;
-const CUSTOMER_API    = process.env.CUSTOMER_API_BASE_URL    || "https://prod.thinksoft.in/profitdesk/api/site-engineer";
+const FLOW_ID         = process.env.WHATSAPP_FLOW_ID;
+const PRIVATE_KEY     = process.env.WHATSAPP_PRIVATE_KEY;   // PEM string
+const CUSTOMER_API    = process.env.CUSTOMER_API_BASE_URL   || "https://prod.thinksoft.in/profitdesk/api/site-engineer";
 const GRAPH_URL       = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}`;
 const SESSION_TTL_MS  = 30 * 60 * 1000;
 
-// ═════════════════════════════════════════════════════════════════════════════
-// PHONE FORMAT HELPERS
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// PHONE HELPERS
+// ═══════════════════════════════════════════════════════
 
 function phone10(raw) {
   if (!raw) return "";
@@ -22,33 +24,15 @@ function phone10(raw) {
 
 function phone91(raw) {
   if (!raw) return "";
-  const digits = String(raw).replace(/\D/g, "");
-  if (digits.length === 10) return "91" + digits;
-  if (digits.length === 12 && digits.startsWith("91")) return digits;
-  return digits;
+  const d = String(raw).replace(/\D/g, "");
+  if (d.length === 10) return "91" + d;
+  if (d.length === 12 && d.startsWith("91")) return d;
+  return d;
 }
 
-async function apiPostWithPhoneFallback(endpoint, baseBody, rawPhone) {
-  const p10 = phone10(rawPhone);
-  const p91 = phone91(rawPhone);
-
-  let result = await apiPost(endpoint, { ...baseBody, phone: p10 });
-  if (result) {
-    console.log(`[apiPost] ${endpoint} matched with phone10: ${p10}`);
-    return result;
-  }
-  result = await apiPost(endpoint, { ...baseBody, phone: p91 });
-  if (result) {
-    console.log(`[apiPost] ${endpoint} matched with phone91: ${p91}`);
-    return result;
-  }
-  console.warn(`[apiPost] ${endpoint} failed for both ${p10} and ${p91}`);
-  return null;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 // EXTERNAL API
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 
 async function apiPost(endpoint, body) {
   try {
@@ -56,10 +40,9 @@ async function apiPost(endpoint, body) {
       headers: { "Content-Type": "application/json" },
       timeout: 15000,
     });
-    if (res.data && String(res.data.status).toLowerCase() === "success") {
-      return res.data.data;
-    }
-    console.warn(`[apiPost] ${endpoint} → status: ${res.data?.status} | msg: ${res.data?.message || "-"}`);
+    const d = res.data;
+    if (d && String(d.status).toLowerCase() === "success") return d.data;
+    console.warn(`[apiPost] ${endpoint} → status:${d?.status} | msg:${d?.message || "-"}`);
     return null;
   } catch (err) {
     console.error(`[apiPost] ${endpoint} error:`, err.message);
@@ -67,54 +50,96 @@ async function apiPost(endpoint, body) {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// SESSION MANAGEMENT
-// ═════════════════════════════════════════════════════════════════════════════
+async function apiWithPhone(endpoint, extraBody, rawPhone) {
+  const p10 = phone10(rawPhone);
+  const p91 = phone91(rawPhone);
+  let result = await apiPost(endpoint, { ...extraBody, phone: p10 });
+  if (result && !(Array.isArray(result) && result.length === 0)) {
+    console.log(`[apiPost] ${endpoint} matched phone10:${p10}`);
+    return result;
+  }
+  result = await apiPost(endpoint, { ...extraBody, phone: p91 });
+  if (result && !(Array.isArray(result) && result.length === 0)) {
+    console.log(`[apiPost] ${endpoint} matched phone91:${p91}`);
+    return result;
+  }
+  console.warn(`[apiPost] ${endpoint} no data for ${p10} / ${p91}`);
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════
+// SESSION STORE
+// ═══════════════════════════════════════════════════════
 
 const sessions = new Map();
 
-function getSession(from, name) {
-  const now      = Date.now();
-  const existing = sessions.get(from);
-  if (existing && now - existing.createdAt > SESSION_TTL_MS) {
-    sessions.delete(from);
-  }
-  if (!sessions.has(from)) {
-    sessions.set(from, {
-      createdAt:      now,
-      step:           "START",
-      phone:          phone10(from),
-      rawPhone:       from,
-      name:           name || "",
-      company_id:     null,
-      company_label:  "",
-      category_id:    null,
-      category_label: "",
-      project_id:     null,
-      project_label:  "",
-      supplier_id:    0,
-      supplier_label: "",
-      amount:         null,
-      remarks:        "",
-      files:          [],
-      companies:      [],
-      categories:     [],
-      projects:       [],
-      vendors:        [],
+function getSession(rawPhone, name) {
+  const key = phone10(rawPhone);
+  const now = Date.now();
+  const ex  = sessions.get(key);
+  if (ex && now - ex.createdAt > SESSION_TTL_MS) sessions.delete(key);
+  if (!sessions.has(key)) {
+    sessions.set(key, {
+      createdAt:     now,
+      rawPhone,
+      name:          name || "",
+      company_id:    null,
+      company_label: "",
+      // dropdown label caches (for SUCCESS screen)
+      catMap:        {},   // id → label
+      projMap:       {},
+      vendorMap:     {},
     });
   }
-  const session = sessions.get(from);
-  if (name && !session.name) session.name = name;
-  return session;
+  const s = sessions.get(key);
+  if (name && !s.name) s.name = name;
+  return s;
 }
 
-function clearSession(from) {
-  sessions.delete(from);
+function clearSession(rawPhone) {
+  sessions.delete(phone10(rawPhone));
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// ENCRYPTION  (AES-128-GCM)
+// ═══════════════════════════════════════════════════════
+
+function decryptFlowRequest(body) {
+  const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
+
+  const privateKey   = crypto.createPrivateKey(PRIVATE_KEY);
+  const decryptedKey = crypto.privateDecrypt(
+    { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+    Buffer.from(encrypted_aes_key, "base64")
+  );
+
+  const iv        = Buffer.from(initial_vector, "base64");
+  const encrypted = Buffer.from(encrypted_flow_data, "base64");
+  const TAG_LEN   = 16;
+  const encData   = encrypted.subarray(0, encrypted.length - TAG_LEN);
+  const authTag   = encrypted.subarray(encrypted.length - TAG_LEN);
+
+  const decipher = crypto.createDecipheriv("aes-128-gcm", decryptedKey, iv);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(encData), decipher.final()]);
+
+  return { decryptedBody: JSON.parse(decrypted.toString("utf8")), aesKey: decryptedKey, iv };
+}
+
+function encryptFlowResponse(responseObj, aesKey, iv) {
+  const flippedIv = Buffer.alloc(iv.length);
+  for (let i = 0; i < iv.length; i++) flippedIv[i] = ~iv[i] & 0xff;
+
+  const cipher    = crypto.createCipheriv("aes-128-gcm", aesKey, flippedIv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(responseObj), "utf8"), cipher.final()]);
+  const authTag   = cipher.getAuthTag();
+
+  return Buffer.concat([encrypted, authTag]).toString("base64");
+}
+
+// ═══════════════════════════════════════════════════════
 // WHATSAPP SENDERS
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 
 async function sendText(to, text) {
   try {
@@ -124,82 +149,45 @@ async function sendText(to, text) {
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
   } catch (err) {
-    console.error(`[sendText] error:`, err.response?.data || err.message);
+    console.error("[sendText] error:", err.response?.data || err.message);
   }
 }
 
-async function sendButtons(to, body, buttons) {
+// Send flow message — opens directly at BILL_FORM with live dropdown data
+async function sendFlowMessage(to, bodyText, billFormData) {
   try {
     await axios.post(
       `${GRAPH_URL}/messages`,
       {
         messaging_product: "whatsapp",
         to,
+        recipient_type: "individual",
         type: "interactive",
         interactive: {
-          type: "button",
-          body: { text: body },
-          action: {
-            buttons: buttons.slice(0, 3).map((b) => ({
-              type:  "reply",
-              reply: { id: String(b.id), title: String(b.title).slice(0, 20) },
-            })),
-          },
-        },
-      },
-      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-    );
-  } catch (err) {
-    console.error(`[sendButtons] error:`, err.response?.data || err.message);
-  }
-}
-
-async function sendList(to, bodyText, buttonLabel, items) {
-  try {
-    await axios.post(
-      `${GRAPH_URL}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "list",
+          type: "flow",
           body: { text: bodyText },
           action: {
-            button: buttonLabel,
-            sections: [
-              {
-                title: "Options",
-                rows: items.slice(0, 10).map((item) => ({
-                  id:    String(item.id || item.value),
-                  title: String(item.title || item.label || item.name).slice(0, 24),
-                })),
+            name: "flow",
+            parameters: {
+              flow_message_version: "3",
+              flow_token:           phone10(to),
+              flow_id:              FLOW_ID,
+              flow_cta:             "Create Bill",
+              flow_action:          "navigate",
+              flow_action_payload: {
+                screen: "BILL_FORM",
+                data:   billFormData,
               },
-            ],
+            },
           },
         },
       },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
+    console.log(`[sendFlowMessage] Flow sent to ${to} → BILL_FORM`);
   } catch (err) {
-    console.error(`[sendList] error:`, err.response?.data || err.message);
-  }
-}
-
-// Smart menu — ≤3 items use buttons, >3 use list
-async function sendMenu(to, bodyText, label, items) {
-  const mapped = items.map((i) => ({
-    id:    String(i.id    != null ? i.id    : i.value),
-    title: String(i.title || i.label || i.name || "Unknown"),
-  }));
-  if (mapped.length === 0) {
-    await sendText(to, `${bodyText}\n\n(No options available)`);
-    return;
-  }
-  if (mapped.length <= 3) {
-    await sendButtons(to, bodyText, mapped);
-  } else {
-    await sendList(to, bodyText, label, mapped);
+    console.error("[sendFlowMessage] error:", err.response?.data || err.message);
+    await sendText(to, "❌ Could not open the bill form. Please try again.");
   }
 }
 
@@ -215,333 +203,242 @@ async function downloadMedia(mediaId) {
       responseType: "arraybuffer",
     });
     const mimeType = fileRes.headers["content-type"] || "image/jpeg";
-    const base64   = Buffer.from(fileRes.data).toString("base64");
-    return `data:${mimeType};base64,${base64}`;
+    return `data:${mimeType};base64,${Buffer.from(fileRes.data).toString("base64")}`;
   } catch (err) {
+    console.error("[downloadMedia] error:", err.message);
     return null;
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// CHAT FLOW STEPS
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// LOAD BILL FORM DATA  (called on "hi" trigger)
+// ═══════════════════════════════════════════════════════
 
-async function stepWelcome(from, session) {
-  // Check if registered
-  const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
-  if (!companies || companies.length === 0) {
-    await sendText(from, "❌ Your number is not registered in ProfitDesk.\nPlease contact your admin.");
-    clearSession(from);
-    return;
-  }
-  session.companies = companies;
+async function loadBillFormData(rawPhone, session) {
+  // 1. Get company
+  const companies = await apiWithPhone("user-company-list", {}, rawPhone);
+  if (!companies || companies.length === 0) return null;
 
-  // Auto-pick company if only one
   if (companies.length === 1) {
-    session.company_id    = String(companies[0].id    != null ? companies[0].id    : companies[0].value);
-    session.company_label = String(companies[0].title || companies[0].label || companies[0].name || "");
+    session.company_id    = String(companies[0].value ?? companies[0].id ?? "");
+    session.company_label = String(companies[0].label || companies[0].name || "");
+  } else {
+    // Multiple companies — pick first for now (can extend later)
+    session.company_id    = String(companies[0].value ?? companies[0].id ?? "");
+    session.company_label = String(companies[0].label || companies[0].name || "");
   }
 
-  const name = session.name || "there";
-  session.step = "WELCOME";
+  // 2. Load categories, projects, vendors in parallel
+  const [categories, projects, vendors] = await Promise.all([
+    apiWithPhone("category-list",     {},                               rawPhone),
+    apiWithPhone("user-project-list", { company_id: session.company_id }, rawPhone),
+    apiWithPhone("vendor-list",       { company_id: session.company_id, category_id: "" }, rawPhone),
+  ]);
 
-  await sendButtons(
-    from,
-    `Hi ${name}! 👋 Welcome to *ProfitDesk*.\n\nTap below to create a new bill.`,
-    [{ id: "create_bill", title: "Create Bill" }]
-  );
-}
+  // 3. Build dropdown options
+  const catOpts = (categories || []).map((c) => ({
+    id:    String(c.value ?? c.id),
+    title: String(c.label || c.name || "Unknown"),
+  }));
 
-async function stepCategory(from, session) {
-  const categories = await apiPostWithPhoneFallback("category-list", {}, session.rawPhone);
-  if (!categories || categories.length === 0) {
-    await sendText(from, "❌ No categories found. Please contact admin.");
-    clearSession(from);
-    return;
-  }
-  session.categories = categories;
-  session.step       = "CATEGORY";
-  await sendMenu(from, "📂 Select bill *category*:", "Select Category", categories);
-}
+  const projOpts = (projects || []).map((p) => ({
+    id:    String(p.value ?? p.id),
+    title: String(p.label || p.name || "Unknown"),
+  }));
 
-async function stepProject(from, session) {
-  const projects = await apiPostWithPhoneFallback("user-project-list", {}, session.rawPhone);
-  if (!projects || projects.length === 0) {
-    await sendText(from, "❌ No projects found. Please contact admin.");
-    clearSession(from);
-    return;
-  }
-  session.projects = projects;
-  session.step     = "PROJECT";
-  await sendMenu(from, "🏗️ Select *project*:", "Select Project", projects);
-}
-
-async function stepVendor(from, session) {
-  const vendors = await apiPostWithPhoneFallback("vendor-list", {}, session.rawPhone);
-  if (!vendors || vendors.length === 0) {
-    // No vendors — skip vendor step
-    session.supplier_id    = 0;
-    session.supplier_label = "-";
-    await stepAmount(from, session);
-    return;
-  }
-  session.vendors = vendors;
-  session.step    = "VENDOR";
-
-  // Add "None" option at top
-  const vendorOptions = [
+  // Filter out API's own "Add New" (value:0)
+  const vendorOpts = [
     { id: "0", title: "None" },
-    ...vendors.map((v) => ({
-      id:    String(v.id != null ? v.id : v.value),
-      title: String(v.title || v.label || v.name || "Unknown"),
-    })),
+    ...(vendors || [])
+      .filter((v) => String(v.value ?? v.id) !== "0")
+      .map((v) => ({
+        id:    String(v.value ?? v.id),
+        title: String(v.label || v.name || "Unknown"),
+      })),
   ];
-  await sendMenu(from, "🏪 Select *vendor/supplier* (optional):", "Select Vendor", vendorOptions);
+
+  // 4. Cache label maps for SUCCESS screen
+  catOpts.forEach((c)    => { session.catMap[c.id]    = c.title; });
+  projOpts.forEach((p)   => { session.projMap[p.id]   = p.title; });
+  vendorOpts.forEach((v) => { session.vendorMap[v.id] = v.title; });
+
+  return {
+    categories:    catOpts.length  > 0 ? catOpts  : [{ id: "0", title: "No categories" }],
+    projects:      projOpts.length > 0 ? projOpts : [{ id: "0", title: "No projects assigned" }],
+    vendors:       vendorOpts,
+    error_message: "",
+  };
 }
 
-async function stepAmount(from, session) {
-  session.step = "AMOUNT";
-  await sendText(
-    from,
-    `💰 Enter the *bill amount* (numbers only):\n\nExample: 5000\n\n` +
-    `📂 Category: ${session.category_label}\n` +
-    `🏗️ Project: ${session.project_label}`
-  );
+// ═══════════════════════════════════════════════════════
+// FLOW SCREEN HANDLERS
+// ═══════════════════════════════════════════════════════
+
+// BILL_FORM → "Next: Add Photos"
+// payload: { category, project, vendor, amount, remarks }
+function handleBillForm(payload, session) {
+  const { category, project, vendor, amount, remarks } = payload;
+
+  return {
+    screen: "ADD_PHOTOS",
+    data: {
+      error_message: "",
+      category:      String(category  || ""),
+      project:       String(project   || ""),
+      vendor:        String(vendor    || "0"),
+      amount:        String(amount    || ""),
+      remarks:       String(remarks   || ""),
+    },
+  };
 }
 
-async function stepRemarks(from, session) {
-  session.step = "REMARKS";
-  await sendText(from, "📝 Enter *remarks* (or type *skip* to continue without remarks):");
+// ADD_PHOTOS → "Next: Add Documents"
+// payload: { photos, category, project, vendor, amount, remarks }
+function handleAddPhotos(payload) {
+  return {
+    screen: "ADD_DOCUMENTS",
+    data: {
+      error_message: "",
+      category:      String(payload.category || ""),
+      project:       String(payload.project  || ""),
+      vendor:        String(payload.vendor   || "0"),
+      amount:        String(payload.amount   || ""),
+      remarks:       String(payload.remarks  || ""),
+      photos:        payload.photos          || [],
+    },
+  };
 }
 
-async function stepPhoto(from, session) {
-  session.step = "PHOTO";
-  await sendText(
-    from,
-    "📎 Send *bill photos or documents* (optional).\n\nSend multiple files one by one.\nType *done* when finished to submit the bill."
-  );
-}
+// ADD_DOCUMENTS → "Submit Bill"
+// payload: { documents, category, project, vendor, amount, remarks, photos }
+async function handleAddDocuments(payload, session) {
+  const rawPhone  = session.rawPhone;
+  const documents = payload.documents || [];
+  const photos    = payload.photos    || [];
 
-async function stepSubmit(from, session) {
-  session.step = "SUBMITTING";
-  await sendText(from, "⏳ Submitting your bill...");
+  // Download all media (photos + documents) as base64
+  const allMedia = [...photos, ...documents].filter(Boolean);
+  const files    = [];
+
+  for (const media of allMedia) {
+    // WhatsApp Flow media objects have a cdn_url or file_name field
+    const mediaId = media?.cdn_url || media?.file_name || media?.id || media;
+    if (!mediaId || typeof mediaId !== "string") continue;
+    const base64 = await downloadMedia(mediaId);
+    if (base64) files.push({ id: Date.now() + Math.random(), document: base64 });
+  }
 
   const now  = new Date();
   const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
   const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
 
-  try {
-    const result = await apiPostWithPhoneFallback("bill-submit", {
+  const category_id = String(payload.category || "");
+  const project_id  = String(payload.project  || "");
+  const supplier_id = String(payload.vendor   || "0");
+  const amount      = payload.amount  || 0;
+  const remarks     = payload.remarks || "";
+
+  console.log("[handleAddDocuments] submitting:", {
+    company_id: session.company_id, category_id, project_id,
+    supplier_id, amount, remarks, files: files.length, date, time,
+  });
+
+  const result = await apiWithPhone(
+    "bill-submit",
+    {
       company_id:  session.company_id,
       date,
       on_time:     time,
-      project_id:  session.project_id,
-      supplier_id: session.supplier_id || 0,
-      category_id: session.category_id,
-      amount:      session.amount,
-      remarks:     session.remarks || "",
-      item:        JSON.stringify(session.files),
-    }, session.rawPhone);
+      project_id,
+      supplier_id: supplier_id === "0" ? 0 : supplier_id,
+      category_id,
+      amount,
+      remarks,
+      item:        JSON.stringify(files),
+    },
+    rawPhone
+  );
 
-    if (result) {
-      await sendText(
-        from,
-        `✅ *Bill Submitted Successfully!*\n\n` +
-        `🏢 Company:  ${session.company_label || "-"}\n` +
-        `🏗️ Project:  ${session.project_label}\n` +
-        `📂 Category: ${session.category_label}\n` +
-        `🏪 Vendor:   ${session.supplier_label}\n` +
-        `💰 Amount:   Rs.${Number(session.amount || 0).toLocaleString("en-IN")}\n` +
-        `📝 Remarks:  ${session.remarks || "-"}\n` +
-        `📎 Files:    ${session.files.length > 0 ? session.files.length + " attached" : "None"}\n\n` +
-        `Send *hi* to submit another bill.`
-      );
-    } else {
-      await sendText(from, "❌ Bill submission failed. Please try again.\nSend *hi* to restart.");
-    }
-  } catch (err) {
-    console.error("[stepSubmit] error:", err.message);
-    await sendText(from, "❌ Bill submission failed. Please try again.\nSend *hi* to restart.");
+  if (!result) {
+    // Return to ADD_DOCUMENTS with error
+    return {
+      screen: "ADD_DOCUMENTS",
+      data: {
+        error_message: "Bill submission failed. Please try again.",
+        category:      String(category_id),
+        project:       String(project_id),
+        vendor:        String(supplier_id),
+        amount:        String(amount),
+        remarks:       String(remarks),
+        photos,
+      },
+    };
   }
 
-  clearSession(from);
+  // Resolve labels from cached maps
+  const catLabel    = session.catMap[category_id]   || category_id;
+  const projLabel   = session.projMap[project_id]   || project_id;
+  const vendLabel   = supplier_id === "0" ? "-" : (session.vendorMap[supplier_id] || supplier_id);
+  const billNo      = result?.ref_bill_no || result?.bill_no || "-";
+  const filesCount  = files.length > 0 ? `${files.length} file(s)` : "None";
+
+  clearSession(rawPhone);
+
+  return {
+    screen: "SUCCESS",
+    data: {
+      ref_bill_no: String(billNo),
+      category:    catLabel,
+      project:     projLabel,
+      amount:      Number(amount).toLocaleString("en-IN"),
+      vendor:      vendLabel,
+      files_count: filesCount,
+    },
+  };
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MAIN MESSAGE HANDLER
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// MAIN WHATSAPP MESSAGE HANDLER
+// ═══════════════════════════════════════════════════════
 
 async function handleMessage(from, message, contactName) {
   const session = getSession(from, contactName);
+  console.log(`[handleMessage] from:${from} type:${message.type}`);
 
-  // ── Media files ────────────────────────────────────────────────────────────
-  if (["image", "document", "video", "audio"].includes(message.type)) {
-    if (session.step === "PHOTO") {
-      const mediaId =
-        message.image?.id    ||
-        message.document?.id ||
-        message.video?.id    ||
-        message.audio?.id;
-      if (mediaId) {
-        await sendText(from, "⏳ Processing file...");
-        const base64 = await downloadMedia(mediaId);
-        if (base64) {
-          session.files.push({ id: Date.now(), document: base64 });
-          await sendText(from, `✅ File ${session.files.length} received! Send more or type *done* to submit.`);
-        } else {
-          await sendText(from, "⚠️ Could not process that file. Try again or type *done* to submit.");
-        }
-      }
-      return;
-    }
-    await sendText(from, "Please follow the current step. Type *cancel* to restart.");
-    return;
-  }
+  if (message.type !== "text") return;
 
-  // ── Button / List reply ────────────────────────────────────────────────────
-  if (message.type === "interactive") {
-    const interactive = message.interactive;
-    let selectedId    = "";
-    let selectedTitle = "";
-
-    if (interactive.type === "button_reply") {
-      selectedId    = interactive.button_reply.id;
-      selectedTitle = interactive.button_reply.title;
-    } else if (interactive.type === "list_reply") {
-      selectedId    = interactive.list_reply.id;
-      selectedTitle = interactive.list_reply.title;
-    }
-
-    // Create Bill button
-    if (session.step === "WELCOME" && selectedId === "create_bill") {
-      await stepCategory(from, session);
-      return;
-    }
-
-    // Company selection (if multiple companies)
-    if (session.step === "COMPANY") {
-      const picked = session.companies.find((c) =>
-        String(c.id != null ? c.id : c.value) === selectedId
-      );
-      if (picked) {
-        session.company_id    = String(picked.id != null ? picked.id : picked.value);
-        session.company_label = String(picked.title || picked.label || picked.name || "");
-        await stepCategory(from, session);
-      }
-      return;
-    }
-
-    // Category selection
-    if (session.step === "CATEGORY") {
-      const picked = session.categories.find((c) =>
-        String(c.id != null ? c.id : c.value) === selectedId
-      );
-      if (picked) {
-        session.category_id    = String(picked.id != null ? picked.id : picked.value);
-        session.category_label = String(picked.title || picked.label || picked.name || picked.category_name || "");
-        await stepProject(from, session);
-      }
-      return;
-    }
-
-    // Project selection
-    if (session.step === "PROJECT") {
-      const picked = session.projects.find((p) =>
-        String(p.id != null ? p.id : p.value) === selectedId
-      );
-      if (picked) {
-        session.project_id    = String(picked.id != null ? picked.id : picked.value);
-        session.project_label = String(picked.title || picked.label || picked.name || picked.project_name || "");
-        await stepVendor(from, session);
-      }
-      return;
-    }
-
-    // Vendor selection
-    if (session.step === "VENDOR") {
-      if (selectedId === "0") {
-        session.supplier_id    = 0;
-        session.supplier_label = "-";
-      } else {
-        const picked = session.vendors.find((v) =>
-          String(v.id != null ? v.id : v.value) === selectedId
-        );
-        if (picked) {
-          session.supplier_id    = String(picked.id != null ? picked.id : picked.value);
-          session.supplier_label = String(picked.title || picked.label || picked.name || picked.vendor_name || picked.supplier_name || "");
-        }
-      }
-      await stepAmount(from, session);
-      return;
-    }
-
-    return;
-  }
-
-  // ── Text messages ──────────────────────────────────────────────────────────
   const text  = String(message.text?.body || "").trim();
   const lower = text.toLowerCase();
 
-  // Cancel anytime
-  if (lower === "cancel") {
-    clearSession(from);
-    await sendText(from, "🔄 Session cancelled. Send *hi* to start again.");
-    return;
-  }
+  if (["hi", "hello", "hey", "hii", "hai", "start"].includes(lower)) {
+    const name = session.name || contactName || "there";
 
-  switch (session.step) {
+    // Load all dropdown data upfront
+    const billFormData = await loadBillFormData(from, session);
 
-    case "START":
-      if (["hi", "hello", "hey", "hii", "hai", "helo", "start"].includes(lower)) {
-        await stepWelcome(from, session);
-      } else {
-        await sendText(from, "👋 Send *hi* to get started with ProfitDesk.");
-      }
-      break;
-
-    case "WELCOME":
-      if (["hi", "hello", "hey"].includes(lower)) {
-        await stepWelcome(from, session);
-      }
-      break;
-
-    case "AMOUNT": {
-      const amount = parseFloat(text.replace(/,/g, ""));
-      if (isNaN(amount) || amount <= 0) {
-        await sendText(from, "⚠️ Please enter a valid amount (numbers only).\nExample: *5000*");
-      } else {
-        session.amount = amount;
-        await stepRemarks(from, session);
-      }
-      break;
+    if (!billFormData) {
+      await sendText(from,
+        "❌ Your number is not registered in ProfitDesk.\nPlease contact your admin."
+      );
+      clearSession(from);
+      return;
     }
 
-    case "REMARKS":
-      session.remarks = lower === "skip" ? "" : text;
-      await stepPhoto(from, session);
-      break;
+    // Send greeting + flow button — flow opens directly at BILL_FORM
+    await sendFlowMessage(
+      from,
+      `Hi ${name}! 👋 Welcome to *ProfitDesk*.\nTap *Create Bill* to submit a new bill.`,
+      billFormData
+    );
 
-    case "PHOTO":
-      if (lower === "done") {
-        await stepSubmit(from, session);
-      } else {
-        await sendText(from, "📎 Send a file or type *done* to submit the bill.");
-      }
-      break;
-
-    default:
-      if (["hi", "hello", "hey"].includes(lower)) {
-        clearSession(from);
-        await stepWelcome(from, getSession(from, contactName));
-      } else {
-        await sendText(from, "👋 Send *hi* to get started.");
-      }
+  } else {
+    await sendText(from, "👋 Send *hi* to get started with ProfitDesk.");
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// WEBHOOK VERIFICATION — GET /webhook/whatsapp
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// WEBHOOK — GET  (Meta verification)
+// ═══════════════════════════════════════════════════════
 
 router.get("/whatsapp", (req, res) => {
   const mode      = req.query["hub.mode"];
@@ -554,9 +451,9 @@ router.get("/whatsapp", (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// RECEIVE WHATSAPP MESSAGES — POST /webhook/whatsapp
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// WEBHOOK — POST  (incoming messages)
+// ═══════════════════════════════════════════════════════
 
 router.post("/whatsapp", (req, res) => {
   res.sendStatus(200);
@@ -574,12 +471,92 @@ router.post("/whatsapp", (req, res) => {
           try {
             await handleMessage(message.from, message, contactName);
           } catch (err) {
-            console.error("WhatsApp handler error:", err);
+            console.error("[WhatsApp handler error]:", err);
           }
         }
       }
     }
   })().catch(console.error);
+});
+
+// ═══════════════════════════════════════════════════════
+// FLOW WEBHOOK — POST /webhook/flow
+// ═══════════════════════════════════════════════════════
+
+router.post("/flow", async (req, res) => {
+  try {
+    // Decrypt
+    let decryptedBody, aesKey, iv;
+    try {
+      ({ decryptedBody, aesKey, iv } = decryptFlowRequest(req.body));
+    } catch (err) {
+      console.error("[Flow] Decryption failed:", err.message);
+      return res.status(421).send("Decryption failed");
+    }
+
+    console.log("[Flow] decrypted:", JSON.stringify(decryptedBody, null, 2));
+
+    const { action, flow_token, data: flowData, screen } = decryptedBody;
+    const rawPhone = flow_token; // flow_token = phone10
+    const session  = getSession(rawPhone, "");
+
+    // ── ping ─────────────────────────────────────────
+    if (action === "ping") {
+      return res.send(encryptFlowResponse({ data: { status: "active" } }, aesKey, iv));
+    }
+
+    // ── INIT ─────────────────────────────────────────
+    // Should not normally be called since we use navigate mode,
+    // but handle defensively — reload data and go to BILL_FORM
+    if (action === "INIT") {
+      const billFormData = await loadBillFormData(rawPhone, session);
+      const responsePayload = billFormData
+        ? { screen: "BILL_FORM", data: billFormData }
+        : { screen: "BILL_FORM", data: {
+            categories: [{ id: "0", title: "Error loading" }],
+            projects:   [{ id: "0", title: "Error loading" }],
+            vendors:    [{ id: "0", title: "None" }],
+            error_message: "Could not load data. Please close and try again.",
+          }};
+      return res.send(encryptFlowResponse(responsePayload, aesKey, iv));
+    }
+
+    // ── data_exchange ─────────────────────────────────
+    if (action === "data_exchange") {
+      let responsePayload;
+
+      if (screen === "BILL_FORM") {
+        responsePayload = handleBillForm(flowData, session);
+
+      } else if (screen === "ADD_PHOTOS") {
+        responsePayload = handleAddPhotos(flowData);
+
+      } else if (screen === "ADD_DOCUMENTS") {
+        responsePayload = await handleAddDocuments(flowData, session);
+
+      } else {
+        console.warn("[Flow] Unknown screen:", screen);
+        responsePayload = {
+          screen: "BILL_FORM",
+          data: {
+            categories:    [],
+            projects:      [],
+            vendors:       [{ id: "0", title: "None" }],
+            error_message: "Something went wrong. Please try again.",
+          },
+        };
+      }
+
+      return res.send(encryptFlowResponse(responsePayload, aesKey, iv));
+    }
+
+    console.warn("[Flow] Unknown action:", action);
+    return res.status(400).send("Unknown action");
+
+  } catch (err) {
+    console.error("[Flow] Unhandled error:", err);
+    return res.status(500).send("Internal error");
+  }
 });
 
 module.exports = router;
