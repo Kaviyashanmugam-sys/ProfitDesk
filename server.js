@@ -20,12 +20,11 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use((req, res, next) => {
   const logPaths = ["/", "/whatsapp", "/flow"];
   if (logPaths.some((p) => req.path === p || req.path.startsWith(p))) {
-    console.log(`\n📨 ${req.method} /webhook${req.path}`);
+    console.log(`\n📨 ${req.method} ${req.path}`); // ✅ Fixed: removed hardcoded /webhook prefix
     console.log(`   Content-Type: ${req.headers["content-type"] || "-"}`);
     if (req.method === "POST") {
       console.log(`   Body Keys: ${Object.keys(req.body || {}).join(", ")}`);
-      // Log flow screen for easier debugging
-      if (req.path === "/flow" && req.body?.screen) {
+      if (req.path === "/webhook/flow" && req.body?.screen) {
         console.log(`   Flow Screen: ${req.body.screen}`);
       }
     }
