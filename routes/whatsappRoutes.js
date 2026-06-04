@@ -1,4 +1,3 @@
-
 const { Router } = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -121,6 +120,10 @@ function toDropdownItem(item) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 const sessions = new Map();
+
+// Cache for flow dropdown data (phone → { categories, projects, vendors })
+// Used to resolve labels on SUCCESS screen
+const flowDataCache = new Map();
 
 function getSession(from, name) {
   const now      = Date.now();
@@ -276,7 +279,6 @@ async function sendFlowMessage(to, flowToken) {
               flow_id:              FLOW_ID,
               flow_cta:             "Open Bill Form",
               flow_action:          "navigate",
-              // ✅ flow_action_payload removed — published flow auto-loads first screen
             },
           },
         },
@@ -588,10 +590,12 @@ router.post("/flow", async (req, res) => {
       return reply({ data: { status: "active" } });
     }
 
-    // ── INIT ──────────────────────────────────────────────────────────────────
-    if (action === "INIT" || !screen || screen === "INIT") {
+    // ── INIT ─────────────────────────────────────────────────────────────────
+    // WhatsApp sends action="INIT" on first open (screen may be "BILL_FORM" or absent)
+    if (action === "INIT") {
       console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
 
+      // ── Step 1: Get companies ──────────────────────────────────────────────
       const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
       console.log(`[Flow INIT] companies: ${JSON.stringify(companyRes)}`);
 
@@ -608,13 +612,15 @@ router.post("/flow", async (req, res) => {
       }
 
       const company   = companyRes[0];
-      const companyId = Number(company.value != null ? company.value : company.id);
+      const companyId = String(company.value != null ? company.value : company.id);
       console.log(`[Flow INIT] using company_id: ${companyId}`);
 
+      // ── Step 2: Fetch categories, projects, vendors in parallel ───────────
+      // NOTE: vendor-list called without category_id — fetch all vendors for company
       const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                              rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                      rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 },      rawPhone),
+        apiPostWithPhoneFallback("category-list",     {},                              rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },       rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId },       rawPhone),
       ]);
 
       console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
@@ -634,6 +640,9 @@ router.post("/flow", async (req, res) => {
 
       console.log(`[Flow INIT] → ${categories.length} cats | ${projects.length} projs | ${vendors.length} vendors`);
 
+      // ── Step 3: Cache labels for SUCCESS screen ───────────────────────────
+      flowDataCache.set(rawPhone, { categories, projects, vendors });
+
       return reply({
         screen: "BILL_FORM",
         data:   { categories, projects, vendors, error_message: "" },
@@ -647,13 +656,20 @@ router.post("/flow", async (req, res) => {
       if (!category || !project || !amount) {
         return reply({
           screen: "BILL_FORM",
-          data:   { error_message: "Category, Project and Amount are required." },
+          data:   {
+            // Re-fetch dropdowns so they stay populated on validation error
+            ...(await refetchDropdownsForPhone(rawPhone)),
+            error_message: "Category, Project and Amount are required.",
+          },
         });
       }
       if (isNaN(Number(amount)) || Number(amount) <= 0) {
         return reply({
           screen: "BILL_FORM",
-          data:   { error_message: "Please enter a valid amount." },
+          data:   {
+            ...(await refetchDropdownsForPhone(rawPhone)),
+            error_message: "Please enter a valid amount.",
+          },
         });
       }
 
@@ -721,6 +737,18 @@ router.post("/flow", async (req, res) => {
       const bill       = submitResult;
       const filesCount = allFiles.length;
 
+      // ── Resolve labels from cache ─────────────────────────────────────────
+      const cached    = flowDataCache.get(rawPhone) || {};
+      const catLabel  = (cached.categories || []).find(c => c.id === String(category))?.title  || String(category);
+      const projLabel = (cached.projects   || []).find(p => p.id === String(project))?.title   || String(project);
+      const venLabel  = (!vendor || vendor === "0")
+        ? "None"
+        : (cached.vendors || []).find(v => v.id === String(vendor))?.title || String(vendor);
+
+      // Clean up cache
+      flowDataCache.delete(rawPhone);
+
+      // ── Save to MongoDB ───────────────────────────────────────────────────
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
@@ -729,7 +757,7 @@ router.post("/flow", async (req, res) => {
           project:     bill.project_id  || null,
           category:    bill.category_id || category,
           amount:      Number(amount),
-          vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
+          vendor:      venLabel === "None" ? "None" : String(bill.supplier_id || vendor),
           remarks:     remarks || "",
           status:      "Not Started",
           billId:      bill.ref_bill_no || bill.bill_no || null,
@@ -743,10 +771,10 @@ router.post("/flow", async (req, res) => {
         screen: "SUCCESS",
         data: {
           ref_bill_no: String(bill.ref_bill_no || bill.bill_no || "—"),
-          category:    String(bill.category_id  || category),
-          project:     String(bill.project_id   || project),
+          category:    catLabel,
+          project:     projLabel,
           amount:      Number(amount).toLocaleString("en-IN"),
-          vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
+          vendor:      venLabel,
           files_count: `${filesCount} file(s)`,
         },
       });
@@ -759,6 +787,39 @@ router.post("/flow", async (req, res) => {
     return res.status(500).send("Server error");
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: re-fetch dropdowns when validation fails on BILL_FORM
+// Returns { categories, projects, vendors } from cache or fresh API call
+// ─────────────────────────────────────────────────────────────────────────────
+async function refetchDropdownsForPhone(rawPhone) {
+  const cached = flowDataCache.get(rawPhone);
+  if (cached) {
+    return {
+      categories: cached.categories,
+      projects:   cached.projects,
+      vendors:    cached.vendors,
+    };
+  }
+  // Cache miss — re-fetch
+  const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+  const company     = companyRes?.[0];
+  const companyId   = company ? String(company.value != null ? company.value : company.id) : "";
+
+  const [categoryRes, projectRes, vendorRes] = await Promise.all([
+    apiPostWithPhoneFallback("category-list",     {},                        rawPhone),
+    apiPostWithPhoneFallback("user-project-list", { company_id: companyId }, rawPhone),
+    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId }, rawPhone),
+  ]);
+
+  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [{ id: "err", title: "No categories" }];
+  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [{ id: "err", title: "No projects" }];
+  const vendorItems = Array.isArray(vendorRes)   ? vendorRes.filter(v => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
+  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
+
+  flowDataCache.set(rawPhone, { categories, projects, vendors });
+  return { categories, projects, vendors };
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // WEBHOOK VERIFICATION — GET /webhook/whatsapp
