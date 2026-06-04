@@ -1,3 +1,4 @@
+
 const { Router } = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -275,7 +276,7 @@ async function sendFlowMessage(to, flowToken) {
               flow_id:              FLOW_ID,
               flow_cta:             "Open Bill Form",
               flow_action:          "navigate",
-              flow_action_payload:  { screen: "BILL_FORM", data: {} },
+              // ✅ flow_action_payload removed — published flow auto-loads first screen
             },
           },
         },
