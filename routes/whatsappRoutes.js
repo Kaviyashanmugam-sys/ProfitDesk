@@ -273,8 +273,8 @@ async function sendFlowMessage(to, flowToken) {
             flow_token:           flowToken,
             flow_id:              FLOW_ID,
             flow_cta:             "Open Bill Form",
-            flow_action:          "data_exchange",        // ✅ Fixed: navigate → data_exchange
-            flow_action_payload:  { screen: "BILL_FORM" },
+            flow_action:          "navigate",
+            flow_action_payload:  { screen: "BILL_FORM", data: {} },  // ✅ data:{} required for INIT
           },
         },
       },
