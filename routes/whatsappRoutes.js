@@ -280,12 +280,9 @@ async function sendFlowMessage(to, flowToken) {
               flow_cta:             "Open Bill Form",
               flow_action:          "navigate",
               flow_action_payload:  {
-                screen: "BILL_FORM",
+                screen: "WELCOME",
                 data: {
-                  categories:    [{ id: "0", title: "Loading..." }],
-                  projects:      [{ id: "0", title: "Loading..." }],
-                  vendors:       [{ id: "0", title: "None" }],
-                  error_message: "",
+                  message: "Tap below to load the bill form.",
                 },
               },
             },
@@ -605,23 +602,23 @@ router.post("/flow", async (req, res) => {
       // Fall through to BILL_FORM handler below
     }
 
+    // ── WELCOME → BILL_FORM (fetch live dropdowns) ────────────────────────────
+    if (screen === "WELCOME") {
+      console.log(`[Flow WELCOME] Fetching dropdowns for ${rawPhone}`);
+      const dropdowns = await refetchDropdownsForPhone(rawPhone);
+      console.log(`[Flow WELCOME] → ${dropdowns.categories.length} cats | ${dropdowns.projects.length} projs | ${dropdowns.vendors.length} vendors`);
+      return reply({
+        screen: "BILL_FORM",
+        data: {
+          ...dropdowns,
+          error_message: "",
+        },
+      });
+    }
+
     // ── BILL_FORM → ADD_PHOTOS ────────────────────────────────────────────────
     if (screen === "BILL_FORM") {
       const { category, project, amount, vendor, remarks } = data;
-
-      // ── First open: category/project/amount all empty → fetch dropdowns ───
-      if (!category && !project && !amount) {
-        console.log(`[Flow BILL_FORM] First open — fetching dropdowns for ${rawPhone}`);
-        const dropdowns = await refetchDropdownsForPhone(rawPhone);
-        console.log(`[Flow BILL_FORM] → ${dropdowns.categories.length} cats | ${dropdowns.projects.length} projs | ${dropdowns.vendors.length} vendors`);
-        return reply({
-          screen: "BILL_FORM",
-          data: {
-            ...dropdowns,
-            error_message: "",
-          },
-        });
-      }
 
       // ── Validation ────────────────────────────────────────────────────────
       if (!category || !project || !amount) {
