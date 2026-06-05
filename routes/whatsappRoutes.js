@@ -160,7 +160,7 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
-async function sendFlowMessage(to, flowToken, rawPhone) {
+async function sendFlowMessage(to, flowToken, rawPhone, userName) {
   console.log(`[sendFlowMessage] to=${to} | flow_token=${flowToken} | FLOW_ID=${FLOW_ID}`);
   try {
     const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
@@ -187,7 +187,7 @@ async function sendFlowMessage(to, flowToken, rawPhone) {
       messaging_product: "whatsapp", to, type: "interactive",
       interactive: {
         type: "flow",
-        body: { text: "Create a new bill using the form below." },
+        body: { text: `Hi ${userName || "there"}, Welcome to ProfitDesk!\n\nClick below to create a new bill.` },
         action: {
           name: "flow",
           parameters: {
@@ -228,8 +228,7 @@ async function stepWelcome(from, session) {
   session.companies = companies;
   const name = session.name || "there";
   if (FLOW_ID) {
-    await sendText(from, `Hi ${name}, Welcome to ProfitDesk!\n\nUse the form below to submit a new bill.`);
-    await sendFlowMessage(from, phone91(from), session.rawPhone);
+    await sendFlowMessage(from, phone91(from), session.rawPhone, session.name);
     session.step = "FLOW_SENT"; return;
   }
   session.step = "WELCOME";
