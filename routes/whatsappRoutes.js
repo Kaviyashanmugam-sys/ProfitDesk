@@ -57,8 +57,8 @@ async function apiPostWithPhoneFallback(endpoint, baseBody, rawPhone) {
 function decryptFlowRequest(body) {
   const { encrypted_flow_data, encrypted_aes_key, initial_vector } = body;
 
-  // ✅ Fix: handle \n literals from Render env vars
-  const rawKey = (FLOW_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+  // ✅ handle \n literals from Render env vars
+  const rawKey     = (FLOW_PRIVATE_KEY || "").replace(/\\n/g, "\n");
   const privateKey = crypto.createPrivateKey(rawKey);
 
   const decryptedAesKey = crypto.privateDecrypt(
@@ -589,8 +589,8 @@ router.post("/flow", async (req, res) => {
       return reply({ data: { status: "active" } });
     }
 
-    // ── INIT ──────────────────────────────────────────────────────────────────
-    if (action === "INIT" || !screen || screen === "INIT") {
+    // ── INIT or WELCOME (old flow compat) ─────────────────────────────────────
+    if (action === "INIT" || screen === "INIT" || screen === "WELCOME" || !screen) {
       console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
 
       const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
@@ -688,7 +688,7 @@ router.post("/flow", async (req, res) => {
       });
     }
 
-    // ── ADD_DOCUMENTS → Submit ────────────────────────────────────────════════
+    // ── ADD_DOCUMENTS → Submit ────────────────────────────────────────────────
     if (screen === "ADD_DOCUMENTS") {
       const { category, project, vendor, amount, remarks, photos, documents } = data;
 
@@ -701,6 +701,8 @@ router.post("/flow", async (req, res) => {
         ...(Array.isArray(documents) ? documents : []),
       ];
 
+      console.log(`[Flow SUBMIT] category=${category} project=${project} amount=${amount} vendor=${vendor} files=${allFiles.length}`);
+
       const submitResult = await apiPostWithPhoneFallback("bill-submit", {
         date,
         on_time:     time,
@@ -712,6 +714,8 @@ router.post("/flow", async (req, res) => {
         item:        JSON.stringify(allFiles),
       }, rawPhone);
 
+      console.log(`[Flow SUBMIT] result: ${JSON.stringify(submitResult)}`);
+
       if (!submitResult) {
         return reply({
           screen: "ADD_DOCUMENTS",
@@ -722,6 +726,7 @@ router.post("/flow", async (req, res) => {
       const bill       = submitResult;
       const filesCount = allFiles.length;
 
+      // Save to MongoDB (non-blocking)
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
@@ -753,10 +758,11 @@ router.post("/flow", async (req, res) => {
       });
     }
 
+    console.warn(`[Flow] Unknown screen: ${screen}`);
     return res.status(400).send("Unknown screen");
 
   } catch (err) {
-    console.error("[Flow] Error:", err?.response?.data || err.message);
+    console.error("[Flow] Unhandled error:", err?.response?.data || err.message);
     return res.status(500).send("Server error");
   }
 });
