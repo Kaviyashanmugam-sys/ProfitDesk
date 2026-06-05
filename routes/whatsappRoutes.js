@@ -615,6 +615,7 @@ router.post("/flow", async (req, res) => {
 
     const reply = (responseObj) => {
       const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
+      res.setHeader("Content-Type", "application/octet-stream");
       return res.send(encrypted);
     };
 
@@ -747,7 +748,7 @@ router.post("/flow", async (req, res) => {
 
       console.log(`[Flow SUBMIT] result: ${JSON.stringify(submitResult)}`);
 
-      if (!submitResult) {
+      if (!submitResult && submitResult !== true) {
         return reply({
           screen: "ADD_DOCUMENTS",
           data:   { error_message: "Submission failed. Please try again." },
@@ -763,8 +764,6 @@ router.post("/flow", async (req, res) => {
         const Bill = require("../models/Bill");
         await Bill.create({
           source:      "whatsapp_flow",
-          company:     bill.company_id  || companyId2 || null,
-          project:     bill.project_id  || project    || null,
           category:    bill.category_id || category,
           amount:      Number(amount),
           vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
