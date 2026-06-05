@@ -515,8 +515,9 @@ router.post("/flow", async (req, res) => {
 
       console.log("[Flow] Sending SUCCESS screen");
       return reply({
-        screen: "SUCCESS",
-        data: {},
+        screen:  "SUCCESS",
+        data:    {},
+        close_flow: true,
       });
     }
 
