@@ -57,7 +57,6 @@ async function apiPostWithPhoneFallback(endpoint, baseBody, rawPhone) {
 function decryptFlowRequest(body) {
   const { encrypted_flow_data, encrypted_aes_key, initial_vector } = body;
 
-  // ✅ handle \n literals from Render env vars
   const rawKey     = (FLOW_PRIVATE_KEY || "").replace(/\\n/g, "\n");
   const privateKey = crypto.createPrivateKey(rawKey);
 
@@ -258,9 +257,35 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
-async function sendFlowMessage(to, flowToken) {
+// ✅ NEW: fetch dropdown data before sending flow message
+async function sendFlowMessage(to, flowToken, rawPhone) {
   console.log(`[sendFlowMessage] to=${to} | flow_token=${flowToken} | FLOW_ID=${FLOW_ID}`);
+
   try {
+    // Fetch company first
+    const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+    const company    = companyRes?.[0];
+    const companyId  = company ? Number(company.value ?? company.id) : 0;
+
+    // Fetch all dropdowns in parallel
+    const [categoryRes, projectRes, vendorRes] = await Promise.all([
+      apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+      apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+      apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+    ]);
+
+    const categories = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+    const projects   = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
+    const vendorItems = Array.isArray(vendorRes)
+      ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem)
+      : [];
+    const vendors = [{ id: "0", title: "None" }, ...vendorItems];
+
+    if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
+    if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+
+    console.log(`[sendFlowMessage] cats=${categories.length} projs=${projects.length} vendors=${vendors.length}`);
+
     await axios.post(
       `${GRAPH_URL}/messages`,
       {
@@ -278,6 +303,10 @@ async function sendFlowMessage(to, flowToken) {
               flow_id:              FLOW_ID,
               flow_cta:             "Open Bill Form",
               flow_action:          "navigate",
+              flow_action_payload:  {
+                screen: "BILL_FORM",
+                data:   { categories, projects, vendors, error_message: "" },
+              },
             },
           },
         },
@@ -323,16 +352,17 @@ async function stepWelcome(from, session) {
     return;
   }
   session.companies = companies;
-  session.step      = "WELCOME";
   const name        = session.name || "there";
 
   if (FLOW_ID) {
     await sendText(from, `Hi ${name}, Welcome to ProfitDesk!\n\nUse the form below to submit a new bill.`);
-    await sendFlowMessage(from, phone91(from));
+    // ✅ pass rawPhone so data is pre-fetched
+    await sendFlowMessage(from, phone91(from), session.rawPhone);
     session.step = "FLOW_SENT";
     return;
   }
 
+  session.step = "WELCOME";
   await sendButtons(
     from,
     `Hi ${name}, Welcome to ProfitDesk!\n\nClick below to create a new bill.`,
@@ -589,13 +619,11 @@ router.post("/flow", async (req, res) => {
       return reply({ data: { status: "active" } });
     }
 
-    // ── INIT or WELCOME (old flow compat) ─────────────────────────────────────
-    if (action === "INIT" || screen === "INIT" || screen === "WELCOME" || !screen) {
-      console.log(`[Flow INIT] raw phone: "${rawPhone}" | p10: "${phone10(rawPhone)}" | p91: "${phone91(rawPhone)}"`);
+    // ── INIT (fallback — should not hit with new approach) ────────────────────
+    if (action === "INIT" || !screen || screen === "INIT" || screen === "WELCOME") {
+      console.log(`[Flow INIT] fetching data for phone: ${rawPhone}`);
 
       const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      console.log(`[Flow INIT] companies: ${JSON.stringify(companyRes)}`);
-
       if (!companyRes || companyRes.length === 0) {
         return reply({
           screen: "BILL_FORM",
@@ -609,22 +637,16 @@ router.post("/flow", async (req, res) => {
       }
 
       const company   = companyRes[0];
-      const companyId = Number(company.value != null ? company.value : company.id);
-      console.log(`[Flow INIT] using company_id: ${companyId}`);
+      const companyId = Number(company.value ?? company.id);
 
       const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                              rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                      rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 },      rawPhone),
+        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
       ]);
 
-      console.log(`[Flow INIT] categories: ${JSON.stringify(categoryRes)}`);
-      console.log(`[Flow INIT] projects:   ${JSON.stringify(projectRes)}`);
-      console.log(`[Flow INIT] vendors:    ${JSON.stringify(vendorRes)}`);
-
-      const categories = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-      const projects   = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-
+      const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+      const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
       const vendorItems = Array.isArray(vendorRes)
         ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem)
         : [];
@@ -726,7 +748,6 @@ router.post("/flow", async (req, res) => {
       const bill       = submitResult;
       const filesCount = allFiles.length;
 
-      // Save to MongoDB (non-blocking)
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
