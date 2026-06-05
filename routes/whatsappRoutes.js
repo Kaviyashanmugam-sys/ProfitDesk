@@ -775,7 +775,8 @@ router.post("/flow", async (req, res) => {
         console.warn("[Flow] MongoDB save skipped:", dbErr.message);
       }
 
-      return reply({
+      console.log("[Flow] Sending SUCCESS screen reply");
+      const successPayload = {
         version: "3.0",
         screen: "SUCCESS",
         data: {
@@ -786,7 +787,9 @@ router.post("/flow", async (req, res) => {
           vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
           files_count: `${filesCount} file(s)`,
         },
-      });
+      };
+      console.log("[Flow] SUCCESS payload:", JSON.stringify(successPayload));
+      return reply(successPayload);
     }
 
     console.warn(`[Flow] Unknown screen: ${screen}`);
