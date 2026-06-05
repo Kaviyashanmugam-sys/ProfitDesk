@@ -615,7 +615,7 @@ router.post("/flow", async (req, res) => {
 
     const reply = (responseObj) => {
       const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
-      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Content-Type", "text/plain");
       return res.send(encrypted);
     };
 
