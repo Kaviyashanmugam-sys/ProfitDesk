@@ -516,14 +516,7 @@ router.post("/flow", async (req, res) => {
       console.log("[Flow] Sending SUCCESS screen");
       return reply({
         screen: "SUCCESS",
-        data: {
-          ref_bill_no: String(bill.ref_bill_no || bill.bill_no || "—"),
-          category:    String(bill.category_id  || category),
-          project:     String(bill.project_id   || project),
-          amount:      Number(amount).toLocaleString("en-IN"),
-          vendor:      (!vendor || vendor === "0") ? "None" : String(vendor),
-          files_count: `${filesCount} file(s)`,
-        },
+        data: {},
       });
     }
 
