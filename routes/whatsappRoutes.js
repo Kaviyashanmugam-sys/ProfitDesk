@@ -8,7 +8,7 @@ const VERIFY_TOKEN    = process.env.WHATSAPP_VERIFY_TOKEN    || "profitdesk_veri
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN    = process.env.WHATSAPP_ACCESS_TOKEN;
 const FLOW_ID         = process.env.WHATSAPP_FLOW_ID;
-const PRIVATE_KEY     = process.env.WHATSAPP_PRIVATE_KEY;
+const PRIVATE_KEY     = process.env.FLOW_PRIVATE_KEY || process.env.WHATSAPP_PRIVATE_KEY;
 const CUSTOMER_API    = process.env.CUSTOMER_API_BASE_URL || "https://prod.thinksoft.in/profitdesk/api/site-engineer";
 const GRAPH_URL       = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}`;
 const SESSION_TTL_MS  = 30 * 60 * 1000;
@@ -108,11 +108,27 @@ function clearSession(rawPhone) {
 function decryptFlowRequest(body) {
   const { encrypted_aes_key, encrypted_flow_data, initial_vector } = body;
 
-  const privateKey   = crypto.createPrivateKey(PRIVATE_KEY);
-  const decryptedKey = crypto.privateDecrypt(
-    { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
-    Buffer.from(encrypted_aes_key, "base64")
-  );
+  // Normalize key — handle literal \n in .env strings
+  const normalizedKey = PRIVATE_KEY.replace(/\\n/g, "\n");
+
+  let privateKey;
+  try {
+    privateKey = crypto.createPrivateKey(normalizedKey);
+  } catch (err) {
+    console.error("[decrypt] createPrivateKey failed:", err.message);
+    throw new Error("Invalid private key: " + err.message);
+  }
+
+  let decryptedKey;
+  try {
+    decryptedKey = crypto.privateDecrypt(
+      { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+      Buffer.from(encrypted_aes_key, "base64")
+    );
+  } catch (err) {
+    console.error("[decrypt] RSA decrypt failed:", err.message);
+    throw new Error("RSA decrypt failed: " + err.message);
+  }
 
   const iv        = Buffer.from(initial_vector, "base64");
   const encrypted = Buffer.from(encrypted_flow_data, "base64");
@@ -120,9 +136,15 @@ function decryptFlowRequest(body) {
   const encData   = encrypted.subarray(0, encrypted.length - TAG_LEN);
   const authTag   = encrypted.subarray(encrypted.length - TAG_LEN);
 
-  const decipher = crypto.createDecipheriv("aes-128-gcm", decryptedKey, iv);
-  decipher.setAuthTag(authTag);
-  const decrypted = Buffer.concat([decipher.update(encData), decipher.final()]);
+  let decrypted;
+  try {
+    const decipher = crypto.createDecipheriv("aes-128-gcm", decryptedKey, iv);
+    decipher.setAuthTag(authTag);
+    decrypted = Buffer.concat([decipher.update(encData), decipher.final()]);
+  } catch (err) {
+    console.error("[decrypt] AES-GCM failed:", err.message);
+    throw new Error("AES decrypt failed: " + err.message);
+  }
 
   return { decryptedBody: JSON.parse(decrypted.toString("utf8")), aesKey: decryptedKey, iv };
 }
@@ -155,39 +177,45 @@ async function sendText(to, text) {
 
 // Opens Flow directly at BILL_FORM with pre-loaded dropdown data
 async function sendFlowMessage(to, bodyText, billFormData) {
-  try {
-    await axios.post(
-      `${GRAPH_URL}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        recipient_type: "individual",
-        type: "interactive",
-        interactive: {
-          type: "flow",
-          body: { text: bodyText },
-          action: {
-            name: "flow",
-            parameters: {
-              flow_message_version: "3",
-              flow_token:           phone10(to),
-              flow_id:              FLOW_ID,
-              flow_cta:             "Create Bill",
-              flow_action:          "navigate",
-              flow_action_payload: {
-                screen: "BILL_FORM",
-                data:   billFormData,
-              },
-            },
+  const messagePayload = {
+    messaging_product: "whatsapp",
+    to,
+    recipient_type: "individual",
+    type: "interactive",
+    interactive: {
+      type: "flow",
+      body: { text: bodyText },
+      action: {
+        name: "flow",
+        parameters: {
+          flow_message_version: "3",
+          flow_token:           phone10(to),
+          flow_id:              FLOW_ID,
+          flow_cta:             "Create Bill",
+          flow_action:          "navigate",
+          flow_action_payload: {
+            screen: "BILL_FORM",
+            data:   billFormData,
           },
         },
       },
+    },
+  };
+
+  console.log("[sendFlowMessage] payload:", JSON.stringify(messagePayload, null, 2));
+
+  try {
+    const res = await axios.post(
+      `${GRAPH_URL}/messages`,
+      messagePayload,
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
-    console.log(`[sendFlowMessage] Flow sent to ${to} → BILL_FORM`);
+    console.log(`[sendFlowMessage] ✅ Flow sent to ${to} | msgId:${res.data?.messages?.[0]?.id}`);
   } catch (err) {
-    console.error("[sendFlowMessage] error:", err.response?.data || err.message);
-    await sendText(to, "❌ Could not open bill form. Please try again.");
+    const errData = err.response?.data;
+    console.error("[sendFlowMessage] ❌ error:", JSON.stringify(errData || err.message, null, 2));
+    console.error("[sendFlowMessage] status:", err.response?.status);
+    await sendText(to, "❌ Could not open bill form. Please try again.\n\nError: " + (errData?.error?.message || err.message));
   }
 }
 
