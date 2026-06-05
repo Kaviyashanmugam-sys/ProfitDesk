@@ -754,15 +754,17 @@ router.post("/flow", async (req, res) => {
         });
       }
 
-      const bill       = submitResult;
+      // submitResult may be true (boolean) or an object depending on API
+      const bill       = typeof submitResult === "object" ? submitResult : {};
       const filesCount = allFiles.length;
 
+      // Save to MongoDB (non-blocking)
       try {
         const Bill = require("../models/Bill");
         await Bill.create({
           source:      "whatsapp_flow",
-          company:     bill.company_id  || null,
-          project:     bill.project_id  || null,
+          company:     bill.company_id  || companyId2 || null,
+          project:     bill.project_id  || project    || null,
           category:    bill.category_id || category,
           amount:      Number(amount),
           vendor:      (!vendor || vendor === "0") ? "None" : String(bill.supplier_id || vendor),
