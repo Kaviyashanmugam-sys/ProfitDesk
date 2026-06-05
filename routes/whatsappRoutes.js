@@ -457,6 +457,7 @@ async function stepSubmit(from, session) {
   try {
     const result = await apiPostWithPhoneFallback("bill-submit", {
       company_id:  session.company_id,
+        company_id:  companyId2,
       date,
       on_time:     time,
       project_id:  session.project_id,
@@ -726,9 +727,14 @@ router.post("/flow", async (req, res) => {
         ...(Array.isArray(documents) ? documents : []),
       ];
 
-      console.log(`[Flow SUBMIT] category=${category} project=${project} amount=${amount} vendor=${vendor} files=${allFiles.length}`);
+      // ✅ fetch company_id — required by API
+      const companyRes2 = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+      const companyId2  = companyRes2?.[0] ? Number(companyRes2[0].value ?? companyRes2[0].id) : 0;
+
+      console.log(`[Flow SUBMIT] company_id=${companyId2} category=${category} project=${project} amount=${amount} vendor=${vendor} files=${allFiles.length}`);
 
       const submitResult = await apiPostWithPhoneFallback("bill-submit", {
+        company_id:  companyId2,
         date,
         on_time:     time,
         category_id: category,
