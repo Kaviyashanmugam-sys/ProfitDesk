@@ -615,8 +615,7 @@ router.post("/flow", async (req, res) => {
 
     const reply = (responseObj) => {
       const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
-      res.setHeader("Content-Type", "text/plain");
-      return res.send(encrypted);
+      return res.status(200).send(encrypted);
     };
 
     // ── PING ──────────────────────────────────────────────────────────────────
@@ -777,6 +776,7 @@ router.post("/flow", async (req, res) => {
       }
 
       return reply({
+        version: "3.0",
         screen: "SUCCESS",
         data: {
           ref_bill_no: String(bill.ref_bill_no || bill.bill_no || "—"),
