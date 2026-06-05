@@ -176,9 +176,12 @@ async function apiPost(endpoint, body) {
       return res.data.data;
     }
     console.warn(`[apiPost] ${endpoint} → status: ${res.data?.status} | msg: ${res.data?.message || "-"}`);
+    console.warn(`[apiPost] ${endpoint} → full response: ${JSON.stringify(res.data)}`);
+    console.warn(`[apiPost] ${endpoint} → body sent: ${JSON.stringify(body)}`);
     return null;
   } catch (err) {
     console.error(`[apiPost] ${endpoint} error:`, err.message);
+    console.error(`[apiPost] ${endpoint} → body sent: ${JSON.stringify(body)}`);
     return null;
   }
 }
