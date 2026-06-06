@@ -602,10 +602,30 @@ router.post("/flow", async (req, res) => {
       // ✅ Send WhatsApp confirmation message + clear session + submit another button
       try {
         const userPhone = phone91(rawPhone);
+
+        // Fetch names for category, project, vendor
+        const [catList, projList, vendList] = await Promise.all([
+          apiPostWithPhoneFallback("category-list",     {},                                          rawPhone),
+          apiPostWithPhoneFallback("user-project-list", { company_id: companyId2 },                  rawPhone),
+          apiPostWithPhoneFallback("vendor-list",       { company_id: companyId2, category_id: 1 }, rawPhone),
+        ]);
+
+        const findName = (list, id) => {
+          if (!list) return id;
+          const item = list.find(i => String(i.id ?? i.value ?? i.category_id ?? i.project_id ?? i.supplier_id) === String(id));
+          return item ? (item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || id) : id;
+        };
+
+        const catName  = findName(catList,  category);
+        const projName = findName(projList, project);
+        const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
+
+        // Save last bill data for pre-fill
+        lastBillData.set(userPhone, { category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" });
+
         clearSession(userPhone);
         clearSession(rawPhone);
 
-        // Send success message with Submit Another Bill button
         await axios.post(
           `${GRAPH_URL}/messages`,
           {
@@ -615,7 +635,13 @@ router.post("/flow", async (req, res) => {
             interactive: {
               type: "button",
               body: {
-                text: `✅ Bill Submitted Successfully!\n\nAmount: Rs.${Number(amount).toLocaleString("en-IN")}\nFiles: ${filesCount} file(s)`
+                text: `✅ Bill Submitted Successfully!\n\n` +
+                      `Category: ${catName}\n` +
+                      `Project:  ${projName}\n` +
+                      `Vendor:   ${vendName}\n` +
+                      `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
+                      `Files:    ${filesCount} file(s)\n\n` +
+                      `Tap below to submit another bill.`
               },
               action: {
                 buttons: [
