@@ -82,7 +82,8 @@ function toDropdownItem(item) {
   return { id, title };
 }
 
-const sessions = new Map();
+const sessions    = new Map();
+const lastBillData = new Map(); // stores last submitted bill per user for pre-fill
 
 function getSession(from, name) {
   const now = Date.now();
@@ -219,6 +220,75 @@ async function downloadMedia(mediaId) {
   } catch { return null; }
 }
 
+async function stepWelcomeWithPrefill(from, session, prefill) {
+  const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
+  if (!companies || companies.length === 0) {
+    await sendText(from, "Your number is not registered in ProfitDesk. Please contact your admin.");
+    clearSession(from); return;
+  }
+  session.companies = companies;
+  const company   = companies[0];
+  const companyId = Number(company.value ?? company.id);
+  const name      = session.name || "there";
+
+  const [categoryRes, projectRes, vendorRes] = await Promise.all([
+    apiPostWithPhoneFallback("category-list",     {},                                         session.rawPhone),
+    apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  session.rawPhone),
+    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, session.rawPhone),
+  ]);
+
+  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
+  const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
+  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
+
+  if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
+  if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+
+  console.log(`[sendFlowMessage prefill] cats=${categories.length} projs=${projects.length} vendors=${vendors.length}`);
+
+  try {
+    await axios.post(`${GRAPH_URL}/messages`, {
+      messaging_product: "whatsapp",
+      to: from,
+      type: "interactive",
+      interactive: {
+        type: "flow",
+        body: { text: `Hi ${name}, tap to review and submit another bill.` },
+        action: {
+          name: "flow",
+          parameters: {
+            flow_message_version: "3",
+            flow_token:           from,
+            flow_id:              FLOW_ID,
+            flow_cta:             "Open Bill Form",
+            flow_action:          "navigate",
+            flow_action_payload:  {
+              screen: "BILL_FORM",
+              data: {
+                categories,
+                projects,
+                vendors,
+                error_message:    "",
+                // pre-fill previous values
+                init_category:    prefill.category  || "",
+                init_project:     prefill.project   || "",
+                init_vendor:      prefill.vendor    || "0",
+                init_amount:      prefill.amount    || "",
+                init_remarks:     prefill.remarks   || "",
+              },
+            },
+          },
+        },
+      },
+    }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
+    session.step = "FLOW_SENT";
+  } catch (err) {
+    console.error("[prefill flow] error:", err.response?.data || err.message);
+    await stepWelcome(from, session);
+  }
+}
+
 async function stepWelcome(from, session) {
   const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
   if (!companies || companies.length === 0) {
@@ -339,7 +409,19 @@ async function handleMessage(from, message, contactName) {
     let selectedId = "";
     if (interactive.type === "button_reply")    selectedId = interactive.button_reply.id;
     else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
-    if (session.step === "WELCOME" && selectedId === "create_bill") { await stepCompany(from, session); return; }
+    if (selectedId === "submit_another_bill") {
+      clearSession(from);
+      const newSession  = getSession(from, contactName);
+      const prefill     = lastBillData.get(from) || {};
+      await stepWelcomeWithPrefill(from, newSession, prefill);
+      return;
+    }
+    if (session.step === "WELCOME" && selectedId === "create_bill") {
+      clearSession(from);
+      const newSession = getSession(from, contactName);
+      await stepWelcome(from, newSession);
+      return;
+    }
     if (session.step === "COMPANY") {
       const picked = session.companies.find((c) => String(c.value || c.id) === selectedId);
       if (picked) { session.company_id = picked.value || picked.id; session.company_label = picked.label || picked.name; await stepCategory(from, session); }
@@ -517,12 +599,33 @@ router.post("/flow", async (req, res) => {
 
       console.log("[Flow] Sending SUCCESS screen");
 
-      // ✅ Send WhatsApp confirmation message + clear session
+      // ✅ Send WhatsApp confirmation message + clear session + submit another button
       try {
         const userPhone = phone91(rawPhone);
         clearSession(userPhone);
         clearSession(rawPhone);
-        await sendText(userPhone, "✅ Bill Submitted Successfully!\n\nSend hi to submit another bill.");
+
+        // Send success message with Submit Another Bill button
+        await axios.post(
+          `${GRAPH_URL}/messages`,
+          {
+            messaging_product: "whatsapp",
+            to: userPhone,
+            type: "interactive",
+            interactive: {
+              type: "button",
+              body: {
+                text: `✅ Bill Submitted Successfully!\n\nAmount: Rs.${Number(amount).toLocaleString("en-IN")}\nFiles: ${filesCount} file(s)`
+              },
+              action: {
+                buttons: [
+                  { type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }
+                ]
+              }
+            }
+          },
+          { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+        );
       } catch (msgErr) {
         console.warn("[Flow] WhatsApp message failed:", msgErr.message);
       }
