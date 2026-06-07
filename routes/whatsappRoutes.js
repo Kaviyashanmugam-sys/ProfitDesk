@@ -575,6 +575,7 @@ router.post("/flow", async (req, res) => {
     // ── ADD_DOCUMENTS → REVIEW ────────────────────────────────────────────────
     if (screen === "ADD_DOCUMENTS") {
       const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
+      console.log(`[ADD_DOCUMENTS] cat_name=${category_name} proj_name=${project_name} vendor_name=${vendor_name}`);
       return reply({
         screen: "REVIEW",
         data: {
