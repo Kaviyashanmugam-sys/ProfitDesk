@@ -82,8 +82,18 @@ function toDropdownItem(item) {
   return { id, title };
 }
 
-const sessions    = new Map();
-const lastBillData = new Map(); // stores last submitted bill per user for pre-fill
+function findName(list, id) {
+  if (!list || !id) return String(id || "");
+  const item = list.find(i => {
+    const itemId = String(i.id ?? i.value ?? i.category_id ?? i.project_id ?? i.supplier_id ?? i.vendor_id ?? "");
+    return itemId === String(id);
+  });
+  if (!item) return String(id);
+  return String(item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || item.title || id);
+}
+
+const sessions     = new Map();
+const lastBillData = new Map();
 
 function getSession(from, name) {
   const now = Date.now();
@@ -161,7 +171,7 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
-async function sendFlowMessage(to, flowToken, rawPhone, userName) {
+async function sendFlowMessage(to, flowToken, rawPhone, userName, prefillRemarks) {
   console.log(`[sendFlowMessage] to=${to} | flow_token=${flowToken} | FLOW_ID=${FLOW_ID}`);
   try {
     const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
@@ -197,7 +207,10 @@ async function sendFlowMessage(to, flowToken, rawPhone, userName) {
             flow_id:              FLOW_ID,
             flow_cta:             "Open Bill Form",
             flow_action:          "navigate",
-            flow_action_payload:  { screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "" } },
+            flow_action_payload:  {
+              screen: "BILL_FORM",
+              data: { categories, projects, vendors, error_message: "", init_remarks: prefillRemarks || "" },
+            },
           },
         },
       },
@@ -206,6 +219,57 @@ async function sendFlowMessage(to, flowToken, rawPhone, userName) {
   } catch (err) {
     console.error(`[sendFlowMessage] ❌ status=${err.response?.status}`);
     console.error(`[sendFlowMessage] ❌ error=`, JSON.stringify(err.response?.data, null, 2));
+  }
+}
+
+// ✅ Send flow directly without greeting message
+async function sendFlowDirect(to, flowToken, rawPhone) {
+  console.log(`[sendFlowDirect] to=${to} | FLOW_ID=${FLOW_ID}`);
+  try {
+    const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+    const company     = companyRes?.[0];
+    const companyId   = company ? Number(company.value ?? company.id) : 0;
+
+    const [categoryRes, projectRes, vendorRes] = await Promise.all([
+      apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+      apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+      apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+    ]);
+
+    const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+    const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
+    const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
+    const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
+
+    if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
+    if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+
+    const prefill = lastBillData.get(to) || {};
+
+    await axios.post(`${GRAPH_URL}/messages`, {
+      messaging_product: "whatsapp", to, type: "interactive",
+      interactive: {
+        type: "flow",
+        body: { text: "Tap to submit another bill." },
+        action: {
+          name: "flow",
+          parameters: {
+            flow_message_version: "3",
+            flow_token:           flowToken,
+            flow_id:              FLOW_ID,
+            flow_cta:             "Open Bill Form",
+            flow_action:          "navigate",
+            flow_action_payload:  {
+              screen: "BILL_FORM",
+              data: { categories, projects, vendors, error_message: "", init_remarks: prefill.remarks || "" },
+            },
+          },
+        },
+      },
+    }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
+    console.log(`[sendFlowDirect] ✅ sent`);
+  } catch (err) {
+    console.error(`[sendFlowDirect] ❌`, err.response?.data || err.message);
   }
 }
 
@@ -220,75 +284,6 @@ async function downloadMedia(mediaId) {
   } catch { return null; }
 }
 
-async function stepWelcomeWithPrefill(from, session, prefill) {
-  const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
-  if (!companies || companies.length === 0) {
-    await sendText(from, "Your number is not registered in ProfitDesk. Please contact your admin.");
-    clearSession(from); return;
-  }
-  session.companies = companies;
-  const company   = companies[0];
-  const companyId = Number(company.value ?? company.id);
-  const name      = session.name || "there";
-
-  const [categoryRes, projectRes, vendorRes] = await Promise.all([
-    apiPostWithPhoneFallback("category-list",     {},                                         session.rawPhone),
-    apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  session.rawPhone),
-    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, session.rawPhone),
-  ]);
-
-  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-  const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
-  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
-
-  if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-  if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-
-  console.log(`[sendFlowMessage prefill] cats=${categories.length} projs=${projects.length} vendors=${vendors.length}`);
-
-  try {
-    await axios.post(`${GRAPH_URL}/messages`, {
-      messaging_product: "whatsapp",
-      to: from,
-      type: "interactive",
-      interactive: {
-        type: "flow",
-        body: { text: `Hi ${name}, tap to review and submit another bill.` },
-        action: {
-          name: "flow",
-          parameters: {
-            flow_message_version: "3",
-            flow_token:           from,
-            flow_id:              FLOW_ID,
-            flow_cta:             "Open Bill Form",
-            flow_action:          "navigate",
-            flow_action_payload:  {
-              screen: "BILL_FORM",
-              data: {
-                categories,
-                projects,
-                vendors,
-                error_message:    "",
-                // pre-fill previous values
-                init_category:    prefill.category  || "",
-                init_project:     prefill.project   || "",
-                init_vendor:      prefill.vendor    || "0",
-                init_amount:      prefill.amount    || "",
-                init_remarks:     prefill.remarks   || "",
-              },
-            },
-          },
-        },
-      },
-    }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
-    session.step = "FLOW_SENT";
-  } catch (err) {
-    console.error("[prefill flow] error:", err.response?.data || err.message);
-    await stepWelcome(from, session);
-  }
-}
-
 async function stepWelcome(from, session) {
   const companies = await apiPostWithPhoneFallback("user-company-list", {}, session.rawPhone);
   if (!companies || companies.length === 0) {
@@ -298,7 +293,8 @@ async function stepWelcome(from, session) {
   session.companies = companies;
   const name = session.name || "there";
   if (FLOW_ID) {
-    await sendFlowMessage(from, phone91(from), session.rawPhone, session.name);
+    const prefill = lastBillData.get(from) || {};
+    await sendFlowMessage(from, phone91(from), session.rawPhone, name, prefill.remarks || "");
     session.step = "FLOW_SENT"; return;
   }
   session.step = "WELCOME";
@@ -409,19 +405,16 @@ async function handleMessage(from, message, contactName) {
     let selectedId = "";
     if (interactive.type === "button_reply")    selectedId = interactive.button_reply.id;
     else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
+
+    // ✅ Submit Another Bill — open flow directly without greeting
     if (selectedId === "submit_another_bill") {
       clearSession(from);
-      const newSession  = getSession(from, contactName);
-      const prefill     = lastBillData.get(from) || {};
-      await stepWelcomeWithPrefill(from, newSession, prefill);
-      return;
-    }
-    if (session.step === "WELCOME" && selectedId === "create_bill") {
-      clearSession(from);
       const newSession = getSession(from, contactName);
-      await stepWelcome(from, newSession);
+      newSession.step  = "FLOW_SENT";
+      await sendFlowDirect(from, phone91(from), from);
       return;
     }
+    if (session.step === "WELCOME" && selectedId === "create_bill") { await stepCompany(from, session); return; }
     if (session.step === "COMPANY") {
       const picked = session.companies.find((c) => String(c.value || c.id) === selectedId);
       if (picked) { session.company_id = picked.value || picked.id; session.company_label = picked.label || picked.name; await stepCategory(from, session); }
@@ -483,7 +476,7 @@ async function handleMessage(from, message, contactName) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// WHATSAPP FLOW WEBHOOK — POST /webhook/flow
+// WHATSAPP FLOW WEBHOOK
 // ═════════════════════════════════════════════════════════════════════════════
 
 router.post("/flow", async (req, res) => {
@@ -503,19 +496,17 @@ router.post("/flow", async (req, res) => {
     console.log(`📋 screen=${screen || "INIT"} | action=${action} | flow_token=${rawPhone}`);
 
     const reply = (responseObj) => {
-      console.log("[Flow] reply() called with screen:", responseObj.screen);
       const encrypted = encryptFlowResponse(responseObj, aesKey, iv);
-      console.log("[Flow] encrypted length:", encrypted.length);
-      res.setHeader("Content-Type", "text/plain");
       return res.status(200).send(encrypted);
     };
 
     if (action === "ping") return reply({ data: { status: "active" } });
 
+    // ── INIT ─────────────────────────────────────────────────────────────────
     if (action === "INIT" || !screen || screen === "INIT" || screen === "WELCOME") {
       const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
       if (!companyRes || companyRes.length === 0) {
-        return reply({ screen: "BILL_FORM", data: { categories: [{ id: "err", title: "Not registered" }], projects: [{ id: "err", title: "Not registered" }], vendors: [{ id: "0", title: "None" }], error_message: "Your account is not active. Contact admin." } });
+        return reply({ screen: "BILL_FORM", data: { categories: [{ id: "err", title: "Not registered" }], projects: [{ id: "err", title: "Not registered" }], vendors: [{ id: "0", title: "None" }], error_message: "Your account is not active. Contact admin.", init_remarks: "" } });
       }
       const company   = companyRes[0];
       const companyId = Number(company.value ?? company.id);
@@ -530,23 +521,78 @@ router.post("/flow", async (req, res) => {
       const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
       if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
       if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-      return reply({ screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "" } });
+      return reply({ screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "", init_remarks: "" } });
     }
 
+    // ── BILL_FORM → ADD_PHOTOS ────────────────────────────────────────────────
     if (screen === "BILL_FORM") {
       const { category, project, amount, vendor, remarks } = data;
       if (!category || !project || !amount) return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
       if (isNaN(Number(amount)) || Number(amount) <= 0) return reply({ screen: "BILL_FORM", data: { error_message: "Please enter a valid amount." } });
-      return reply({ screen: "ADD_PHOTOS", data: { error_message: "", category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" } });
+
+      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+      const companyId  = companyRes?.[0] ? Number(companyRes[0].value ?? companyRes[0].id) : 0;
+      const [catList, projList, vendList] = await Promise.all([
+        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+      ]);
+
+      const catName  = findName(catList,  category);
+      const projName = findName(projList, project);
+      const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
+
+      return reply({
+        screen: "ADD_PHOTOS",
+        data: {
+          error_message: "",
+          category, category_name: catName,
+          project,  project_name:  projName,
+          vendor:   vendor || "0", vendor_name: vendName,
+          amount:   String(amount),
+          remarks:  remarks || "",
+        },
+      });
     }
 
+    // ── ADD_PHOTOS → ADD_DOCUMENTS ────────────────────────────────────────────
     if (screen === "ADD_PHOTOS") {
-      const { category, project, vendor, amount, remarks, photos } = data;
-      return reply({ screen: "ADD_DOCUMENTS", data: { error_message: "", category: category || "", project: project || "", vendor: vendor || "0", amount: amount || "", remarks: remarks || "", photos: Array.isArray(photos) ? photos : [] } });
+      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos } = data;
+      return reply({
+        screen: "ADD_DOCUMENTS",
+        data: {
+          error_message: "",
+          category, category_name: category_name || category,
+          project,  project_name:  project_name  || project,
+          vendor:   vendor || "0", vendor_name: vendor_name || "None",
+          amount:   amount  || "",
+          remarks:  remarks || "",
+          photos:   Array.isArray(photos) ? photos : [],
+        },
+      });
     }
 
+    // ── ADD_DOCUMENTS → REVIEW ────────────────────────────────────────────────
     if (screen === "ADD_DOCUMENTS") {
-      const { category, project, vendor, amount, remarks, photos, documents } = data;
+      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
+      return reply({
+        screen: "REVIEW",
+        data: {
+          error_message: "",
+          category, category_name: category_name || category,
+          project,  project_name:  project_name  || project,
+          vendor:   vendor || "0", vendor_name: vendor_name || "None",
+          amount:   amount  || "",
+          remarks:  remarks || "",
+          photos:   Array.isArray(photos)    ? photos    : [],
+          documents: Array.isArray(documents) ? documents : [],
+        },
+      });
+    }
+
+    // ── REVIEW → Submit ───────────────────────────────────────────────────────
+    if (screen === "REVIEW") {
+      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
       const now  = new Date();
       const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
       const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -559,8 +605,7 @@ router.post("/flow", async (req, res) => {
 
       const submitResult = await apiPostWithPhoneFallback("bill-submit", {
         company_id:  companyId2,
-        date,
-        on_time:     time,
+        date, on_time: time,
         category_id: category,
         project_id:  project,
         supplier_id: (!vendor || vendor === "0") ? 0 : Number(vendor),
@@ -572,94 +617,60 @@ router.post("/flow", async (req, res) => {
       console.log(`[Flow SUBMIT] result: ${JSON.stringify(submitResult)}`);
 
       if (!submitResult && submitResult !== true) {
-        return reply({ screen: "ADD_DOCUMENTS", data: { error_message: "Submission failed. Please try again." } });
+        return reply({ screen: "REVIEW", data: { error_message: "Submission failed. Please try again." } });
       }
 
-      const bill       = typeof submitResult === "object" ? submitResult : {};
       const filesCount = allFiles.length;
+      const catName    = category_name || category;
+      const projName   = project_name  || project;
+      const vendName   = vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
 
-      // Save to MongoDB (non-blocking, failures don't affect flow)
       setImmediate(async () => {
         try {
           const Bill = require("../models/Bill");
           await Bill.create({
-            source:   "whatsapp_flow",
-            category: String(bill.category_id || category),
-            amount:   Number(amount),
-            vendor:   (!vendor || vendor === "0") ? "None" : String(vendor),
-            remarks:  remarks || "",
-            status:   "Not Started",
-            billId:   bill.ref_bill_no || bill.bill_no || null,
-            attachments: [],
+            source: "whatsapp_flow", category: catName,
+            amount: Number(amount), vendor: vendName,
+            remarks: remarks || "", status: "Not Started", attachments: [],
           });
-        } catch (dbErr) {
-          console.warn("[Flow] MongoDB save skipped:", dbErr.message);
-        }
+        } catch (dbErr) { console.warn("[Flow] MongoDB save skipped:", dbErr.message); }
       });
 
-      console.log("[Flow] Sending SUCCESS screen");
+      const userPhone = phone91(rawPhone);
+      lastBillData.set(userPhone, { category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" });
+      clearSession(userPhone);
+      clearSession(rawPhone);
 
-      // ✅ Send WhatsApp confirmation message + clear session + submit another button
+      console.log("[Flow] Sending success message");
+
       try {
-        const userPhone = phone91(rawPhone);
-
-        // Fetch names for category, project, vendor
-        const [catList, projList, vendList] = await Promise.all([
-          apiPostWithPhoneFallback("category-list",     {},                                          rawPhone),
-          apiPostWithPhoneFallback("user-project-list", { company_id: companyId2 },                  rawPhone),
-          apiPostWithPhoneFallback("vendor-list",       { company_id: companyId2, category_id: 1 }, rawPhone),
-        ]);
-
-        const findName = (list, id) => {
-          if (!list) return id;
-          const item = list.find(i => String(i.id ?? i.value ?? i.category_id ?? i.project_id ?? i.supplier_id) === String(id));
-          return item ? (item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || id) : id;
-        };
-
-        const catName  = findName(catList,  category);
-        const projName = findName(projList, project);
-        const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
-
-        // Save last bill data for pre-fill
-        lastBillData.set(userPhone, { category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" });
-
-        clearSession(userPhone);
-        clearSession(rawPhone);
-
-        await axios.post(
-          `${GRAPH_URL}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: userPhone,
-            type: "interactive",
-            interactive: {
-              type: "button",
-              body: {
-                text: `✅ Bill Submitted Successfully!\n\n` +
-                      `Category: ${catName}\n` +
-                      `Project:  ${projName}\n` +
-                      `Vendor:   ${vendName}\n` +
-                      `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
-                      `Files:    ${filesCount} file(s)\n\n` +
-                      `Tap below to submit another bill.`
-              },
-              action: {
-                buttons: [
-                  { type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }
-                ]
-              }
+        await axios.post(`${GRAPH_URL}/messages`, {
+          messaging_product: "whatsapp",
+          to: userPhone,
+          type: "interactive",
+          interactive: {
+            type: "button",
+            body: {
+              text: `✅ Bill Submitted Successfully!\n\n` +
+                    `Category: ${catName}\n` +
+                    `Project:  ${projName}\n` +
+                    `Vendor:   ${vendName}\n` +
+                    `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
+                    `Files:    ${filesCount} file(s)\n\n` +
+                    `Tap below to submit another bill.`
+            },
+            action: {
+              buttons: [
+                { type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }
+              ]
             }
-          },
-          { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-        );
+          }
+        }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
       } catch (msgErr) {
         console.warn("[Flow] WhatsApp message failed:", msgErr.message);
       }
 
-      return reply({
-        screen: "SUCCESS",
-        data:   {},
-      });
+      return reply({ screen: "SUCCESS", data: {} });
     }
 
     console.warn(`[Flow] Unknown screen: ${screen}`);
