@@ -585,6 +585,11 @@ router.post("/flow", async (req, res) => {
         apiPostWithPhoneFallback("vendor-list",       { company_id: companyIdX, category_id: 1 }, rawPhone),
       ]);
 
+      // Debug: log first item to see API response format
+      console.log(`[ADD_DOCUMENTS] catList[0]=`, JSON.stringify(catListX?.[0]));
+      console.log(`[ADD_DOCUMENTS] projList[0]=`, JSON.stringify(projListX?.[0]));
+      console.log(`[ADD_DOCUMENTS] category id to match=`, category);
+
       const catNameX  = findName(catListX,  category);
       const projNameX = findName(projListX, project);
       const vendNameX = (!vendor || vendor === "0") ? "None" : findName(vendListX, vendor);
