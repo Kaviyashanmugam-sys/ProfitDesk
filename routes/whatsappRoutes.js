@@ -579,18 +579,18 @@ router.post("/flow", async (req, res) => {
         screen: "REVIEW",
         data: {
           error_message: "",
-          category, category_name: category_name || category,
-          project,  project_name:  project_name  || project,
-          vendor:   vendor || "0", vendor_name: vendor_name || "None",
-          amount:   amount  || "",
-          remarks:  remarks || "",
-          photos:   Array.isArray(photos)    ? photos    : [],
-          documents: Array.isArray(documents) ? documents : [],
+          category,      category_name: category_name || category,
+          project,       project_name:  project_name  || project,
+          vendor:        vendor || "0", vendor_name: vendor_name || "None",
+          amount:        amount  || "",
+          remarks:       remarks || "",
+          photos:        Array.isArray(photos)    ? photos    : [],
+          documents:     Array.isArray(documents) ? documents : [],
         },
       });
     }
 
-    // ── REVIEW → Submit ───────────────────────────────────────────────────────
+    // ── REVIEW → Submit or Cancel ────────────────────────────────────────────
     if (screen === "REVIEW") {
       const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
       const now  = new Date();
@@ -671,6 +671,10 @@ router.post("/flow", async (req, res) => {
       }
 
       return reply({ screen: "SUCCESS", data: {} });
+    // ── SUCCESS (terminal) ────────────────────────────────────────────────────
+    if (screen === "SUCCESS") {
+      return reply({ data: { status: "ok" } });
+    }
     }
 
     console.warn(`[Flow] Unknown screen: ${screen}`);
