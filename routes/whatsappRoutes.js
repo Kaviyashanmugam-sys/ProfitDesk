@@ -575,14 +575,29 @@ router.post("/flow", async (req, res) => {
     // ── ADD_DOCUMENTS → REVIEW ────────────────────────────────────────────────
     if (screen === "ADD_DOCUMENTS") {
       const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
-      console.log(`[ADD_DOCUMENTS] cat_name=${category_name} proj_name=${project_name} vendor_name=${vendor_name}`);
+
+      // ✅ Always fetch fresh names from API (in case flow JSON didn't pass them)
+      const companyResX = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+      const companyIdX  = companyResX?.[0] ? Number(companyResX[0].value ?? companyResX[0].id) : 0;
+      const [catListX, projListX, vendListX] = await Promise.all([
+        apiPostWithPhoneFallback("category-list",     {},                                          rawPhone),
+        apiPostWithPhoneFallback("user-project-list", { company_id: companyIdX },                  rawPhone),
+        apiPostWithPhoneFallback("vendor-list",       { company_id: companyIdX, category_id: 1 }, rawPhone),
+      ]);
+
+      const catNameX  = findName(catListX,  category);
+      const projNameX = findName(projListX, project);
+      const vendNameX = (!vendor || vendor === "0") ? "None" : findName(vendListX, vendor);
+
+      console.log(`[ADD_DOCUMENTS] cat=${category} cat_name=${catNameX} proj=${project} proj_name=${projNameX} vendor=${vendor} vendor_name=${vendNameX}`);
+
       return reply({
         screen: "REVIEW",
         data: {
           error_message: "",
-          category,      category_name: category_name || category,
-          project,       project_name:  project_name  || project,
-          vendor:        vendor || "0", vendor_name: vendor_name || "None",
+          category,      category_name: catNameX,
+          project,       project_name:  projNameX,
+          vendor:        vendor || "0", vendor_name: vendNameX,
           amount:        amount  || "",
           remarks:       remarks || "",
           photos:        Array.isArray(photos)    ? photos    : [],
