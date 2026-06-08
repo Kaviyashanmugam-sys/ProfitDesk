@@ -82,7 +82,6 @@ function toDropdownItem(item) {
   return { id, title };
 }
 
-// ✅ Fixed findName — checks title field (used by toDropdownItem)
 function findName(list, id) {
   if (!list || !id) return String(id || "");
   const strId = String(id);
@@ -94,11 +93,7 @@ function findName(list, id) {
     return itemId === strId;
   });
   if (!item) return strId;
-  return String(
-    item.title || item.name || item.category_name ||
-    item.project_name || item.vendor_name ||
-    item.supplier_name || strId
-  );
+  return String(item.title || item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || strId);
 }
 
 const sessions     = new Map();
@@ -142,6 +137,24 @@ async function apiPost(endpoint, body) {
   }
 }
 
+async function fetchDropdowns(rawPhone) {
+  const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+  const company    = companyRes?.[0];
+  const companyId  = company ? Number(company.value ?? company.id) : 0;
+  const [categoryRes, projectRes, vendorRes] = await Promise.all([
+    apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+    apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+  ]);
+  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
+  const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
+  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
+  if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
+  if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+  return { categories, projects, vendors, companyId, catList: categoryRes, projList: projectRes, vendList: vendorRes };
+}
+
 async function sendText(to, text) {
   await axios.post(`${GRAPH_URL}/messages`,
     { messaging_product: "whatsapp", to, type: "text", text: { body: text } },
@@ -180,25 +193,7 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
-async function fetchDropdowns(rawPhone) {
-  const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-  const company    = companyRes?.[0];
-  const companyId  = company ? Number(company.value ?? company.id) : 0;
-  const [categoryRes, projectRes, vendorRes] = await Promise.all([
-    apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-    apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
-  ]);
-  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-  const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
-  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
-  if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-  if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-  return { categories, projects, vendors, companyId, catList: categoryRes, projList: projectRes, vendList: vendorRes };
-}
-
-async function sendFlowMessage(to, flowToken, rawPhone, userName, prefillRemarks) {
+async function sendFlowMessage(to, flowToken, rawPhone, userName) {
   console.log(`[sendFlowMessage] to=${to} | FLOW_ID=${FLOW_ID}`);
   try {
     const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
@@ -217,7 +212,7 @@ async function sendFlowMessage(to, flowToken, rawPhone, userName, prefillRemarks
             flow_action:          "navigate",
             flow_action_payload:  {
               screen: "BILL_FORM",
-              data: { categories, projects, vendors, error_message: "", init_remarks: prefillRemarks || "" },
+              data: { categories, projects, vendors, error_message: "" },
             },
           },
         },
@@ -233,7 +228,6 @@ async function sendFlowDirect(to, flowToken, rawPhone) {
   console.log(`[sendFlowDirect] to=${to} | FLOW_ID=${FLOW_ID}`);
   try {
     const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
-    const prefill = lastBillData.get(to) || {};
     await axios.post(`${GRAPH_URL}/messages`, {
       messaging_product: "whatsapp", to, type: "interactive",
       interactive: {
@@ -249,7 +243,7 @@ async function sendFlowDirect(to, flowToken, rawPhone) {
             flow_action:          "navigate",
             flow_action_payload:  {
               screen: "BILL_FORM",
-              data: { categories, projects, vendors, error_message: "", init_remarks: prefill.remarks || "" },
+              data: { categories, projects, vendors, error_message: "" },
             },
           },
         },
@@ -281,8 +275,7 @@ async function stepWelcome(from, session) {
   session.companies = companies;
   const name = session.name || "there";
   if (FLOW_ID) {
-    const prefill = lastBillData.get(from) || {};
-    await sendFlowMessage(from, phone91(from), session.rawPhone, name, prefill.remarks || "");
+    await sendFlowMessage(from, phone91(from), session.rawPhone, name);
     session.step = "FLOW_SENT"; return;
   }
   session.step = "WELCOME";
@@ -492,7 +485,7 @@ router.post("/flow", async (req, res) => {
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (action === "INIT" || !screen || screen === "INIT" || screen === "WELCOME") {
       const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
-      return reply({ screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "", init_remarks: "" } });
+      return reply({ screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "" } });
     }
 
     // ── BILL_FORM → ADD_PHOTOS ────────────────────────────────────────────────
@@ -506,53 +499,40 @@ router.post("/flow", async (req, res) => {
       const projName = findName(projList, project);
       const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
 
-      console.log(`[BILL_FORM] cat=${category} name=${catName} | proj=${project} name=${projName} | vendor=${vendor} name=${vendName}`);
+      console.log(`[BILL_FORM] cat_name=${catName} proj_name=${projName} vendor_name=${vendName}`);
 
       return reply({
         screen: "ADD_PHOTOS",
         data: {
           error_message: "",
-          category, category_name: catName,
-          project,  project_name:  projName,
-          vendor:   vendor || "0", vendor_name: vendName,
-          amount:   String(amount),
-          remarks:  remarks || "",
+          category, project, vendor: vendor || "0",
+          amount: String(amount), remarks: remarks || "",
         },
       });
     }
 
     // ── ADD_PHOTOS → ADD_DOCUMENTS ────────────────────────────────────────────
     if (screen === "ADD_PHOTOS") {
-      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos } = data;
+      const { category, project, vendor, amount, remarks, photos } = data;
       return reply({
         screen: "ADD_DOCUMENTS",
         data: {
           error_message: "",
-          category, category_name: category_name || category,
-          project,  project_name:  project_name  || project,
-          vendor:   vendor || "0", vendor_name: vendor_name || "None",
-          amount:   amount  || "",
-          remarks:  remarks || "",
-          photos:   Array.isArray(photos) ? photos : [],
+          category, project, vendor: vendor || "0",
+          amount: amount || "", remarks: remarks || "",
+          photos: Array.isArray(photos) ? photos : [],
         },
       });
     }
 
-    // ── ADD_DOCUMENTS → REVIEW ────────────────────────────────────────────────
+    // ── ADD_DOCUMENTS → REVIEW (fetch names here) ─────────────────────────────
     if (screen === "ADD_DOCUMENTS") {
-      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
+      const { category, project, vendor, amount, remarks, photos, documents } = data;
 
-      // If names missing, fetch fresh
-      let catName  = category_name;
-      let projName = project_name;
-      let vendName = vendor_name;
-
-      if (!catName || catName === category || !projName || projName === project) {
-        const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
-        catName  = findName(catList,  category);
-        projName = findName(projList, project);
-        vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
-      }
+      const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
+      const catName  = findName(catList,  category);
+      const projName = findName(projList, project);
+      const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
 
       console.log(`[ADD_DOCUMENTS→REVIEW] cat_name=${catName} proj_name=${projName} vendor_name=${vendName}`);
 
@@ -579,13 +559,13 @@ router.post("/flow", async (req, res) => {
       const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
       const allFiles = [...(Array.isArray(photos) ? photos : []), ...(Array.isArray(documents) ? documents : [])];
 
-      const companyRes2 = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      const companyId2  = companyRes2?.[0] ? Number(companyRes2[0].value ?? companyRes2[0].id) : 0;
+      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+      const companyId  = companyRes?.[0] ? Number(companyRes[0].value ?? companyRes[0].id) : 0;
 
-      console.log(`[Flow SUBMIT] company_id=${companyId2} category=${category} project=${project} amount=${amount} vendor=${vendor} files=${allFiles.length}`);
+      console.log(`[REVIEW→SUBMIT] company_id=${companyId} category=${category} project=${project} amount=${amount} files=${allFiles.length}`);
 
       const submitResult = await apiPostWithPhoneFallback("bill-submit", {
-        company_id:  companyId2,
+        company_id:  companyId,
         date, on_time: time,
         category_id: category,
         project_id:  project,
@@ -603,12 +583,10 @@ router.post("/flow", async (req, res) => {
 
       const filesCount = allFiles.length;
       const bill       = typeof submitResult === "object" && submitResult !== true ? submitResult : {};
-
-      // Use API response names (most accurate) or fallback to flow data
-      const catName  = bill.category || category_name || category;
-      const projName = bill.project  || project_name  || project;
-      const vendName = bill.vendor   || vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
-      const billNo   = bill.ref_bill_no || "—";
+      const catName    = bill.category || category_name || category;
+      const projName   = bill.project  || project_name  || project;
+      const vendName   = bill.vendor   || vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
+      const billNo     = bill.ref_bill_no || "—";
 
       setImmediate(async () => {
         try {
@@ -625,8 +603,6 @@ router.post("/flow", async (req, res) => {
       lastBillData.set(userPhone, { category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" });
       clearSession(userPhone);
       clearSession(rawPhone);
-
-      console.log("[Flow] Sending success message");
 
       try {
         await axios.post(`${GRAPH_URL}/messages`, {
@@ -646,9 +622,7 @@ router.post("/flow", async (req, res) => {
                     `Tap below to submit another bill.`
             },
             action: {
-              buttons: [
-                { type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }
-              ]
+              buttons: [{ type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }]
             }
           }
         }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
@@ -659,10 +633,7 @@ router.post("/flow", async (req, res) => {
       return reply({ screen: "SUCCESS", data: {} });
     }
 
-    // ── SUCCESS ───────────────────────────────────────────────────────────────
-    if (screen === "SUCCESS") {
-      return reply({ data: { status: "ok" } });
-    }
+    if (screen === "SUCCESS") return reply({ data: { status: "ok" } });
 
     console.warn(`[Flow] Unknown screen: ${screen}`);
     return res.status(400).send("Unknown screen");
