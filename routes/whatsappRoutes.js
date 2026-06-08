@@ -146,6 +146,9 @@ async function fetchDropdowns(rawPhone) {
     apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
     apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
   ]);
+  console.log(`[fetchDropdowns] catList[0]=`, JSON.stringify(categoryRes?.[0]));
+  console.log(`[fetchDropdowns] projList[0]=`, JSON.stringify(projectRes?.[0]));
+  console.log(`[fetchDropdowns] vendList[0]=`, JSON.stringify(vendorRes?.[0]));
   const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
   const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
   const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
