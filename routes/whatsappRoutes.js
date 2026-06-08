@@ -65,34 +65,21 @@ function encryptFlowResponse(responseObj, aesKey, iv) {
 }
 
 function toDropdownItem(item) {
-  const id = String(
-    item.id          != null ? item.id          :
-    item.value       != null ? item.value       :
-    item.category_id != null ? item.category_id :
-    item.project_id  != null ? item.project_id  :
-    item.vendor_id   != null ? item.vendor_id   :
-    item.supplier_id != null ? item.supplier_id :
-    item.company_id  != null ? item.company_id  : ""
-  );
-  const title = String(
-    item.name || item.label || item.title ||
-    item.category_name || item.project_name ||
-    item.vendor_name || item.supplier_name || item.company_name || "Unknown"
-  );
+  const id = String(item.value ?? item.id ?? "");
+  const title = String(item.label || item.title || item.name || "Unknown");
   return { id, title };
 }
 
 function findName(list, id) {
   if (!list || !id) return String(id || "");
   const strId = String(id);
-  // ✅ API returns {value, label} format
   const item = list.find(i => String(i.value ?? i.id ?? "") === strId);
   if (!item) return strId;
   return String(item.label || item.title || item.name || strId);
 }
 
-const sessions     = new Map();
-const lastBillData = new Map();
+const sessions      = new Map();
+const pendingBills  = new Map(); // stores bill data waiting for confirm
 
 function getSession(from, name) {
   const now = Date.now();
@@ -141,9 +128,6 @@ async function fetchDropdowns(rawPhone) {
     apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
     apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
   ]);
-  console.log(`[fetchDropdowns] catList[0]=`, JSON.stringify(categoryRes?.[0]));
-  console.log(`[fetchDropdowns] projList[0]=`, JSON.stringify(projectRes?.[0]));
-  console.log(`[fetchDropdowns] vendList[0]=`, JSON.stringify(vendorRes?.[0]));
   const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
   const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
   const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
@@ -292,21 +276,21 @@ async function stepCompany(from, session) {
 
 async function stepCategory(from, session) {
   const categories = await apiPostWithPhoneFallback("category-list", {}, session.rawPhone);
-  if (!categories || categories.length === 0) { await sendText(from, "No categories found. Please contact admin."); clearSession(from); return; }
+  if (!categories || categories.length === 0) { await sendText(from, "No categories found."); clearSession(from); return; }
   session.categories = categories; session.step = "CATEGORY";
   await sendMenu(from, "Select bill category:", "Select Category", categories);
 }
 
 async function stepProject(from, session) {
   const projects = await apiPostWithPhoneFallback("user-project-list", {}, session.rawPhone);
-  if (!projects || projects.length === 0) { await sendText(from, "No projects found. Please contact admin."); clearSession(from); return; }
+  if (!projects || projects.length === 0) { await sendText(from, "No projects found."); clearSession(from); return; }
   session.projects = projects; session.step = "PROJECT";
   await sendMenu(from, "Select your project:", "Select Project", projects);
 }
 
 async function stepAmount(from, session) {
   session.step = "AMOUNT";
-  await sendText(from, `Category: ${session.category_label}\nProject: ${session.project_label}\n\nEnter the bill amount (numbers only):\nExample: 5000`);
+  await sendText(from, `Category: ${session.category_label}\nProject: ${session.project_label}\n\nEnter the bill amount:\nExample: 5000`);
 }
 
 async function stepVendor(from, session) {
@@ -318,12 +302,12 @@ async function stepVendor(from, session) {
 
 async function stepRemarks(from, session) {
   session.step = "REMARKS";
-  await sendText(from, "Enter remarks (or type skip to continue without remarks):");
+  await sendText(from, "Enter remarks (or type skip to continue):");
 }
 
 async function stepPhoto(from, session) {
   session.step = "PHOTO";
-  await sendText(from, "Send bill photos, PDFs, or documents (optional).\n\nSend multiple files one by one.\nType done when finished to submit the bill.");
+  await sendText(from, "Send bill photos, PDFs, or documents (optional).\n\nType done when finished.");
 }
 
 async function stepSubmit(from, session) {
@@ -334,14 +318,10 @@ async function stepSubmit(from, session) {
   const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
   try {
     const result = await apiPostWithPhoneFallback("bill-submit", {
-      company_id:  session.company_id,
-      date, on_time: time,
-      project_id:  session.project_id,
-      supplier_id: session.supplier_id,
-      category_id: session.category_id,
-      amount:      session.amount,
-      remarks:     session.remarks || "",
-      item:        JSON.stringify(session.files),
+      company_id: session.company_id, date, on_time: time,
+      project_id: session.project_id, supplier_id: session.supplier_id,
+      category_id: session.category_id, amount: session.amount,
+      remarks: session.remarks || "", item: JSON.stringify(session.files),
     }, session.rawPhone);
     if (result) {
       await sendText(from,
@@ -349,15 +329,13 @@ async function stepSubmit(from, session) {
         `Company:  ${session.company_label}\nProject:  ${session.project_label}\n` +
         `Category: ${session.category_label}\nVendor:   ${session.supplier_label}\n` +
         `Amount:   Rs.${Number(session.amount || 0).toLocaleString("en-IN")}\n` +
-        `Remarks:  ${session.remarks || "-"}\n` +
-        `Files:    ${session.files.length > 0 ? session.files.length + " attached" : "None"}\n\n` +
-        `Send hi to submit another bill.`
+        `Remarks:  ${session.remarks || "-"}\n\nSend hi to submit another bill.`
       );
     } else {
-      await sendText(from, "❌ Bill submission failed. Please try again.\nSend hi to restart.");
+      await sendText(from, "❌ Bill submission failed. Send hi to restart.");
     }
   } catch (err) {
-    await sendText(from, "❌ Bill submission failed. Please try again.\nSend hi to restart.");
+    await sendText(from, "❌ Bill submission failed. Send hi to restart.");
   }
   clearSession(from);
 }
@@ -371,8 +349,8 @@ async function handleMessage(from, message, contactName) {
       if (mediaId) {
         await sendText(from, "Processing file...");
         const base64 = await downloadMedia(mediaId);
-        if (base64) { session.files.push({ id: Date.now(), document: base64 }); await sendText(from, `File ${session.files.length} received! Send more or type done to submit.`); }
-        else await sendText(from, "Could not process that file. Try again or type done to submit.");
+        if (base64) { session.files.push({ id: Date.now(), document: base64 }); await sendText(from, `File ${session.files.length} received! Type done to submit.`); }
+        else await sendText(from, "Could not process. Try again or type done.");
       }
       return;
     }
@@ -385,13 +363,84 @@ async function handleMessage(from, message, contactName) {
     if (interactive.type === "button_reply")    selectedId = interactive.button_reply.id;
     else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
 
+    // ── Submit Another Bill ──────────────────────────────────────────────────
     if (selectedId === "submit_another_bill") {
       clearSession(from);
+      pendingBills.delete(from);
       const newSession = getSession(from, contactName);
       newSession.step  = "FLOW_SENT";
       await sendFlowDirect(from, phone91(from), from);
       return;
     }
+
+    // ── Confirm Bill Submit ──────────────────────────────────────────────────
+    if (selectedId === "confirm_submit") {
+      const pending = pendingBills.get(from);
+      if (!pending) { await sendText(from, "Session expired. Send hi to restart."); return; }
+      pendingBills.delete(from);
+      session.step = "SUBMITTING";
+
+      const now  = new Date();
+      const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+      const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+      try {
+        const submitResult = await apiPostWithPhoneFallback("bill-submit", {
+          company_id:  pending.companyId,
+          date, on_time: time,
+          category_id: pending.category,
+          project_id:  pending.project,
+          supplier_id: (!pending.vendor || pending.vendor === "0") ? 0 : Number(pending.vendor),
+          amount:      Number(pending.amount),
+          remarks:     pending.remarks || "",
+          item:        JSON.stringify(pending.allFiles),
+        }, from);
+
+        if (submitResult && submitResult !== false) {
+          const bill    = typeof submitResult === "object" ? submitResult : {};
+          const billNo  = bill.ref_bill_no || "—";
+          const catName = bill.category || pending.catName;
+          const projName= bill.project  || pending.projName;
+          const vendName= bill.vendor   || pending.vendName;
+
+          setImmediate(async () => {
+            try {
+              const Bill = require("../models/Bill");
+              await Bill.create({ source: "whatsapp_flow", category: catName, amount: Number(pending.amount), vendor: vendName, remarks: pending.remarks || "", status: "Not Started", attachments: [] });
+            } catch (dbErr) { console.warn("[Flow] MongoDB save skipped:", dbErr.message); }
+          });
+
+          clearSession(from);
+          await sendButtons(from,
+            `✅ Bill Submitted Successfully!\n\n` +
+            `Bill No: ${billNo}\n` +
+            `Category: ${catName}\n` +
+            `Project:  ${projName}\n` +
+            `Vendor:   ${vendName}\n` +
+            `Amount:   Rs.${Number(pending.amount).toLocaleString("en-IN")}\n` +
+            `Files:    ${pending.allFiles.length} file(s)\n\n` +
+            `Tap below to submit another bill.`,
+            [{ id: "submit_another_bill", title: "Submit Another Bill" }]
+          );
+        } else {
+          await sendText(from, "❌ Submission failed. Send hi to restart.");
+          clearSession(from);
+        }
+      } catch (err) {
+        await sendText(from, "❌ Submission failed. Send hi to restart.");
+        clearSession(from);
+      }
+      return;
+    }
+
+    // ── Cancel Bill ──────────────────────────────────────────────────────────
+    if (selectedId === "cancel_submit") {
+      pendingBills.delete(from);
+      clearSession(from);
+      await sendText(from, "Bill cancelled. Send hi to start again.");
+      return;
+    }
+
     if (session.step === "WELCOME" && selectedId === "create_bill") { await stepCompany(from, session); return; }
     if (session.step === "COMPANY") {
       const picked = session.companies.find((c) => String(c.value || c.id) === selectedId);
@@ -419,7 +468,7 @@ async function handleMessage(from, message, contactName) {
   const text  = String((message.text && message.text.body) || "").trim();
   const lower = text.toLowerCase();
 
-  if (lower === "cancel") { clearSession(from); await sendText(from, "Session cancelled. Send hi to start again."); return; }
+  if (lower === "cancel") { clearSession(from); pendingBills.delete(from); await sendText(from, "Cancelled. Send hi to start again."); return; }
 
   switch (session.step) {
     case "START":
@@ -435,7 +484,7 @@ async function handleMessage(from, message, contactName) {
       break;
     case "AMOUNT": {
       const amount = parseFloat(text.replace(/,/g, ""));
-      if (isNaN(amount) || amount <= 0) await sendText(from, "Please enter a valid amount (numbers only).\nExample: 5000");
+      if (isNaN(amount) || amount <= 0) await sendText(from, "Please enter a valid amount.\nExample: 5000");
       else { session.amount = amount; await stepVendor(from, session); }
       break;
     }
@@ -445,7 +494,7 @@ async function handleMessage(from, message, contactName) {
       break;
     case "PHOTO":
       if (lower === "done") await stepSubmit(from, session);
-      else await sendText(from, "Send a file or type done to submit the bill.");
+      else await sendText(from, "Send a file or type done to submit.");
       break;
     default:
       if (["hi", "hello"].includes(lower)) { clearSession(from); await stepWelcome(from, getSession(from, contactName)); }
@@ -454,7 +503,7 @@ async function handleMessage(from, message, contactName) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// WHATSAPP FLOW WEBHOOK
+// FLOW WEBHOOK
 // ═════════════════════════════════════════════════════════════════════════════
 
 router.post("/flow", async (req, res) => {
@@ -491,21 +540,9 @@ router.post("/flow", async (req, res) => {
       const { category, project, amount, vendor, remarks } = data;
       if (!category || !project || !amount) return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
       if (isNaN(Number(amount)) || Number(amount) <= 0) return reply({ screen: "BILL_FORM", data: { error_message: "Please enter a valid amount." } });
-
-      const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
-      const catName  = findName(catList,  category);
-      const projName = findName(projList, project);
-      const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
-
-      console.log(`[BILL_FORM] cat_name=${catName} proj_name=${projName} vendor_name=${vendName}`);
-
       return reply({
         screen: "ADD_PHOTOS",
-        data: {
-          error_message: "",
-          category, project, vendor: vendor || "0",
-          amount: String(amount), remarks: remarks || "",
-        },
+        data: { error_message: "", category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" },
       });
     }
 
@@ -514,120 +551,48 @@ router.post("/flow", async (req, res) => {
       const { category, project, vendor, amount, remarks, photos } = data;
       return reply({
         screen: "ADD_DOCUMENTS",
-        data: {
-          error_message: "",
-          category, project, vendor: vendor || "0",
-          amount: amount || "", remarks: remarks || "",
-          photos: Array.isArray(photos) ? photos : [],
-        },
+        data: { error_message: "", category, project, vendor: vendor || "0", amount: amount || "", remarks: remarks || "", photos: Array.isArray(photos) ? photos : [] },
       });
     }
 
-    // ── ADD_DOCUMENTS → REVIEW (fetch names here) ─────────────────────────────
+    // ── ADD_DOCUMENTS → Send summary for confirmation ─────────────────────────
     if (screen === "ADD_DOCUMENTS") {
       const { category, project, vendor, amount, remarks, photos, documents } = data;
+      const allFiles = [...(Array.isArray(photos) ? photos : []), ...(Array.isArray(documents) ? documents : [])];
 
-      const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
+      const { catList, projList, vendList, companyId } = await fetchDropdowns(rawPhone);
       const catName  = findName(catList,  category);
       const projName = findName(projList, project);
       const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
 
-      console.log(`[ADD_DOCUMENTS→REVIEW] cat_name=${catName} proj_name=${projName} vendor_name=${vendName}`);
+      console.log(`[ADD_DOCUMENTS] cat=${catName} proj=${projName} vendor=${vendName} amount=${amount} files=${allFiles.length}`);
 
-      return reply({
-        screen: "REVIEW",
-        data: {
-          error_message: "",
-          category,      category_name: catName,
-          project,       project_name:  projName,
-          vendor:        vendor || "0", vendor_name: vendName,
-          amount:        amount  || "",
-          remarks:       remarks || "",
-          photos:        Array.isArray(photos)    ? photos    : [],
-          documents:     Array.isArray(documents) ? documents : [],
-        },
-      });
-    }
-
-    // ── REVIEW → Submit ───────────────────────────────────────────────────────
-    if (screen === "REVIEW") {
-      const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
-      const now  = new Date();
-      const date = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-      const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-      const allFiles = [...(Array.isArray(photos) ? photos : []), ...(Array.isArray(documents) ? documents : [])];
-
-      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      const companyId  = companyRes?.[0] ? Number(companyRes[0].value ?? companyRes[0].id) : 0;
-
-      console.log(`[REVIEW→SUBMIT] company_id=${companyId} category=${category} project=${project} amount=${amount} files=${allFiles.length}`);
-
-      const submitResult = await apiPostWithPhoneFallback("bill-submit", {
-        company_id:  companyId,
-        date, on_time: time,
-        category_id: category,
-        project_id:  project,
-        supplier_id: (!vendor || vendor === "0") ? 0 : Number(vendor),
-        amount:      Number(amount),
-        remarks:     remarks || "",
-        item:        JSON.stringify(allFiles),
-      }, rawPhone);
-
-      console.log(`[Flow SUBMIT] result: ${JSON.stringify(submitResult)}`);
-
-      if (!submitResult && submitResult !== true) {
-        return reply({ screen: "REVIEW", data: { error_message: "Submission failed. Please try again." } });
-      }
-
-      const filesCount = allFiles.length;
-      const bill       = typeof submitResult === "object" && submitResult !== true ? submitResult : {};
-      const catName    = bill.category || category_name || category;
-      const projName   = bill.project  || project_name  || project;
-      const vendName   = bill.vendor   || vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
-      const billNo     = bill.ref_bill_no || "—";
-
-      setImmediate(async () => {
-        try {
-          const Bill = require("../models/Bill");
-          await Bill.create({
-            source: "whatsapp_flow", category: catName,
-            amount: Number(amount), vendor: vendName,
-            remarks: remarks || "", status: "Not Started", attachments: [],
-          });
-        } catch (dbErr) { console.warn("[Flow] MongoDB save skipped:", dbErr.message); }
-      });
-
+      // Store pending bill
       const userPhone = phone91(rawPhone);
-      lastBillData.set(userPhone, { category, project, vendor: vendor || "0", amount: String(amount), remarks: remarks || "" });
-      clearSession(userPhone);
-      clearSession(rawPhone);
+      pendingBills.set(userPhone, { category, project, vendor, amount, remarks, allFiles, catName, projName, vendName, companyId });
 
-      console.log(`[Flow] Sending success to ${userPhone} | cat=${catName} proj=${projName} vendor=${vendName} billNo=${billNo}`);
+      // Clear flow session, set to CONFIRMING
+      const session = getSession(userPhone);
+      session.step  = "CONFIRMING";
 
+      // Send summary with Confirm/Cancel buttons
       try {
-        await axios.post(`${GRAPH_URL}/messages`, {
-          messaging_product: "whatsapp",
-          to: userPhone,
-          type: "interactive",
-          interactive: {
-            type: "button",
-            body: {
-              text: `✅ Bill Submitted Successfully!\n\n` +
-                    `Bill No: ${billNo}\n` +
-                    `Category: ${catName}\n` +
-                    `Project:  ${projName}\n` +
-                    `Vendor:   ${vendName}\n` +
-                    `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
-                    `Files:    ${filesCount} file(s)\n\n` +
-                    `Tap below to submit another bill.`
-            },
-            action: {
-              buttons: [{ type: "reply", reply: { id: "submit_another_bill", title: "Submit Another Bill" } }]
-            }
-          }
-        }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
+        await sendButtons(userPhone,
+          `📋 Bill Summary\n\n` +
+          `Category: ${catName}\n` +
+          `Project:  ${projName}\n` +
+          `Vendor:   ${vendName}\n` +
+          `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
+          `Remarks:  ${remarks || "-"}\n` +
+          `Files:    ${allFiles.length} file(s)\n\n` +
+          `Please confirm to submit.`,
+          [
+            { id: "confirm_submit", title: "✅ Confirm & Submit" },
+            { id: "cancel_submit",  title: "❌ Cancel" },
+          ]
+        );
       } catch (msgErr) {
-        console.warn("[Flow] WhatsApp message failed:", msgErr.message);
+        console.warn("[Flow] Summary message failed:", msgErr.message);
       }
 
       return reply({ screen: "SUCCESS", data: {} });
