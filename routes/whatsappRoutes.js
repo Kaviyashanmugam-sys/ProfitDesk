@@ -82,14 +82,23 @@ function toDropdownItem(item) {
   return { id, title };
 }
 
+// ✅ Fixed findName — checks title field (used by toDropdownItem)
 function findName(list, id) {
   if (!list || !id) return String(id || "");
+  const strId = String(id);
   const item = list.find(i => {
-    const itemId = String(i.id ?? i.value ?? i.category_id ?? i.project_id ?? i.supplier_id ?? i.vendor_id ?? "");
-    return itemId === String(id);
+    const itemId = String(
+      i.id          ?? i.value       ?? i.category_id ??
+      i.project_id  ?? i.supplier_id ?? i.vendor_id   ?? ""
+    );
+    return itemId === strId;
   });
-  if (!item) return String(id);
-  return String(item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || item.title || id);
+  if (!item) return strId;
+  return String(
+    item.title || item.name || item.category_name ||
+    item.project_name || item.vendor_name ||
+    item.supplier_name || strId
+  );
 }
 
 const sessions     = new Map();
@@ -171,29 +180,28 @@ async function sendMenu(to, bodyText, label, items) {
   }
 }
 
+async function fetchDropdowns(rawPhone) {
+  const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
+  const company    = companyRes?.[0];
+  const companyId  = company ? Number(company.value ?? company.id) : 0;
+  const [categoryRes, projectRes, vendorRes] = await Promise.all([
+    apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
+    apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
+    apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
+  ]);
+  const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
+  const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
+  const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
+  const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
+  if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
+  if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+  return { categories, projects, vendors, companyId, catList: categoryRes, projList: projectRes, vendList: vendorRes };
+}
+
 async function sendFlowMessage(to, flowToken, rawPhone, userName, prefillRemarks) {
-  console.log(`[sendFlowMessage] to=${to} | flow_token=${flowToken} | FLOW_ID=${FLOW_ID}`);
+  console.log(`[sendFlowMessage] to=${to} | FLOW_ID=${FLOW_ID}`);
   try {
-    const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-    const company     = companyRes?.[0];
-    const companyId   = company ? Number(company.value ?? company.id) : 0;
-
-    const [categoryRes, projectRes, vendorRes] = await Promise.all([
-      apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-      apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-      apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
-    ]);
-
-    const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-    const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-    const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
-    const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
-
-    if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-    if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-
-    console.log(`[sendFlowMessage] cats=${categories.length} projs=${projects.length} vendors=${vendors.length}`);
-
+    const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
     await axios.post(`${GRAPH_URL}/messages`, {
       messaging_product: "whatsapp", to, type: "interactive",
       interactive: {
@@ -215,37 +223,17 @@ async function sendFlowMessage(to, flowToken, rawPhone, userName, prefillRemarks
         },
       },
     }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
-    console.log(`[sendFlowMessage] ✅ sent successfully`);
+    console.log(`[sendFlowMessage] ✅ sent`);
   } catch (err) {
-    console.error(`[sendFlowMessage] ❌ status=${err.response?.status}`);
-    console.error(`[sendFlowMessage] ❌ error=`, JSON.stringify(err.response?.data, null, 2));
+    console.error(`[sendFlowMessage] ❌`, err.response?.data || err.message);
   }
 }
 
-// ✅ Send flow directly without greeting message
 async function sendFlowDirect(to, flowToken, rawPhone) {
   console.log(`[sendFlowDirect] to=${to} | FLOW_ID=${FLOW_ID}`);
   try {
-    const companyRes  = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-    const company     = companyRes?.[0];
-    const companyId   = company ? Number(company.value ?? company.id) : 0;
-
-    const [categoryRes, projectRes, vendorRes] = await Promise.all([
-      apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-      apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-      apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
-    ]);
-
-    const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-    const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-    const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
-    const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
-
-    if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-    if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
-
+    const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
     const prefill = lastBillData.get(to) || {};
-
     await axios.post(`${GRAPH_URL}/messages`, {
       messaging_product: "whatsapp", to, type: "interactive",
       interactive: {
@@ -406,7 +394,6 @@ async function handleMessage(from, message, contactName) {
     if (interactive.type === "button_reply")    selectedId = interactive.button_reply.id;
     else if (interactive.type === "list_reply") selectedId = interactive.list_reply.id;
 
-    // ✅ Submit Another Bill — open flow directly without greeting
     if (selectedId === "submit_another_bill") {
       clearSession(from);
       const newSession = getSession(from, contactName);
@@ -504,23 +491,7 @@ router.post("/flow", async (req, res) => {
 
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (action === "INIT" || !screen || screen === "INIT" || screen === "WELCOME") {
-      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      if (!companyRes || companyRes.length === 0) {
-        return reply({ screen: "BILL_FORM", data: { categories: [{ id: "err", title: "Not registered" }], projects: [{ id: "err", title: "Not registered" }], vendors: [{ id: "0", title: "None" }], error_message: "Your account is not active. Contact admin.", init_remarks: "" } });
-      }
-      const company   = companyRes[0];
-      const companyId = Number(company.value ?? company.id);
-      const [categoryRes, projectRes, vendorRes] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
-      ]);
-      const categories  = Array.isArray(categoryRes) ? categoryRes.map(toDropdownItem) : [];
-      const projects    = Array.isArray(projectRes)  ? projectRes.map(toDropdownItem)  : [];
-      const vendorItems = Array.isArray(vendorRes) ? vendorRes.filter((v) => String(v.value ?? v.id) !== "0").map(toDropdownItem) : [];
-      const vendors     = [{ id: "0", title: "None" }, ...vendorItems];
-      if (categories.length === 0) categories.push({ id: "err", title: "No categories found" });
-      if (projects.length   === 0) projects.push(  { id: "err", title: "No projects found"   });
+      const { categories, projects, vendors } = await fetchDropdowns(rawPhone);
       return reply({ screen: "BILL_FORM", data: { categories, projects, vendors, error_message: "", init_remarks: "" } });
     }
 
@@ -530,17 +501,12 @@ router.post("/flow", async (req, res) => {
       if (!category || !project || !amount) return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
       if (isNaN(Number(amount)) || Number(amount) <= 0) return reply({ screen: "BILL_FORM", data: { error_message: "Please enter a valid amount." } });
 
-      const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      const companyId  = companyRes?.[0] ? Number(companyRes[0].value ?? companyRes[0].id) : 0;
-      const [catList, projList, vendList] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                         rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyId },                  rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyId, category_id: 1 }, rawPhone),
-      ]);
-
+      const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
       const catName  = findName(catList,  category);
       const projName = findName(projList, project);
       const vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
+
+      console.log(`[BILL_FORM] cat=${category} name=${catName} | proj=${project} name=${projName} | vendor=${vendor} name=${vendName}`);
 
       return reply({
         screen: "ADD_PHOTOS",
@@ -576,33 +542,27 @@ router.post("/flow", async (req, res) => {
     if (screen === "ADD_DOCUMENTS") {
       const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
 
-      // ✅ Always fetch fresh names from API (in case flow JSON didn't pass them)
-      const companyResX = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-      const companyIdX  = companyResX?.[0] ? Number(companyResX[0].value ?? companyResX[0].id) : 0;
-      const [catListX, projListX, vendListX] = await Promise.all([
-        apiPostWithPhoneFallback("category-list",     {},                                          rawPhone),
-        apiPostWithPhoneFallback("user-project-list", { company_id: companyIdX },                  rawPhone),
-        apiPostWithPhoneFallback("vendor-list",       { company_id: companyIdX, category_id: 1 }, rawPhone),
-      ]);
+      // If names missing, fetch fresh
+      let catName  = category_name;
+      let projName = project_name;
+      let vendName = vendor_name;
 
-      // Debug: log first item to see API response format
-      console.log(`[ADD_DOCUMENTS] catList[0]=`, JSON.stringify(catListX?.[0]));
-      console.log(`[ADD_DOCUMENTS] projList[0]=`, JSON.stringify(projListX?.[0]));
-      console.log(`[ADD_DOCUMENTS] category id to match=`, category);
+      if (!catName || catName === category || !projName || projName === project) {
+        const { catList, projList, vendList } = await fetchDropdowns(rawPhone);
+        catName  = findName(catList,  category);
+        projName = findName(projList, project);
+        vendName = (!vendor || vendor === "0") ? "None" : findName(vendList, vendor);
+      }
 
-      const catNameX  = findName(catListX,  category);
-      const projNameX = findName(projListX, project);
-      const vendNameX = (!vendor || vendor === "0") ? "None" : findName(vendListX, vendor);
-
-      console.log(`[ADD_DOCUMENTS] cat=${category} cat_name=${catNameX} proj=${project} proj_name=${projNameX} vendor=${vendor} vendor_name=${vendNameX}`);
+      console.log(`[ADD_DOCUMENTS→REVIEW] cat_name=${catName} proj_name=${projName} vendor_name=${vendName}`);
 
       return reply({
         screen: "REVIEW",
         data: {
           error_message: "",
-          category,      category_name: catNameX,
-          project,       project_name:  projNameX,
-          vendor:        vendor || "0", vendor_name: vendNameX,
+          category,      category_name: catName,
+          project,       project_name:  projName,
+          vendor:        vendor || "0", vendor_name: vendName,
           amount:        amount  || "",
           remarks:       remarks || "",
           photos:        Array.isArray(photos)    ? photos    : [],
@@ -611,7 +571,7 @@ router.post("/flow", async (req, res) => {
       });
     }
 
-    // ── REVIEW → Submit or Cancel ────────────────────────────────────────────
+    // ── REVIEW → Submit ───────────────────────────────────────────────────────
     if (screen === "REVIEW") {
       const { category, category_name, project, project_name, vendor, vendor_name, amount, remarks, photos, documents } = data;
       const now  = new Date();
@@ -642,9 +602,13 @@ router.post("/flow", async (req, res) => {
       }
 
       const filesCount = allFiles.length;
-      const catName    = category_name || category;
-      const projName   = project_name  || project;
-      const vendName   = vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
+      const bill       = typeof submitResult === "object" && submitResult !== true ? submitResult : {};
+
+      // Use API response names (most accurate) or fallback to flow data
+      const catName  = bill.category || category_name || category;
+      const projName = bill.project  || project_name  || project;
+      const vendName = bill.vendor   || vendor_name   || ((!vendor || vendor === "0") ? "None" : vendor);
+      const billNo   = bill.ref_bill_no || "—";
 
       setImmediate(async () => {
         try {
@@ -673,6 +637,7 @@ router.post("/flow", async (req, res) => {
             type: "button",
             body: {
               text: `✅ Bill Submitted Successfully!\n\n` +
+                    `Bill No: ${billNo}\n` +
                     `Category: ${catName}\n` +
                     `Project:  ${projName}\n` +
                     `Vendor:   ${vendName}\n` +
@@ -692,10 +657,11 @@ router.post("/flow", async (req, res) => {
       }
 
       return reply({ screen: "SUCCESS", data: {} });
-    // ── SUCCESS (terminal) ────────────────────────────────────────────────────
+    }
+
+    // ── SUCCESS ───────────────────────────────────────────────────────────────
     if (screen === "SUCCESS") {
       return reply({ data: { status: "ok" } });
-    }
     }
 
     console.warn(`[Flow] Unknown screen: ${screen}`);
