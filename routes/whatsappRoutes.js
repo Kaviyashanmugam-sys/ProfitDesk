@@ -602,6 +602,8 @@ router.post("/flow", async (req, res) => {
       clearSession(userPhone);
       clearSession(rawPhone);
 
+      console.log(`[Flow] Sending success to ${userPhone} | cat=${catName} proj=${projName} vendor=${vendName} billNo=${billNo}`);
+
       try {
         await axios.post(`${GRAPH_URL}/messages`, {
           messaging_product: "whatsapp",
