@@ -85,15 +85,10 @@ function toDropdownItem(item) {
 function findName(list, id) {
   if (!list || !id) return String(id || "");
   const strId = String(id);
-  const item = list.find(i => {
-    const itemId = String(
-      i.id          ?? i.value       ?? i.category_id ??
-      i.project_id  ?? i.supplier_id ?? i.vendor_id   ?? ""
-    );
-    return itemId === strId;
-  });
+  // ✅ API returns {value, label} format
+  const item = list.find(i => String(i.value ?? i.id ?? "") === strId);
   if (!item) return strId;
-  return String(item.title || item.name || item.category_name || item.project_name || item.vendor_name || item.supplier_name || strId);
+  return String(item.label || item.title || item.name || strId);
 }
 
 const sessions     = new Map();
