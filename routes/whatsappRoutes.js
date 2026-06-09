@@ -492,8 +492,10 @@ async function handleMessage(from, message, contactName) {
       if (["hi", "hello", "hey"].includes(lower)) await sendButtons(from, `Hi ${session.name || "there"}, Welcome to ProfitDesk!\n\nClick below to create a new bill.`, [{ id: "create_bill", title: "Create Bill" }]);
       break;
     case "FLOW_SENT":
-      if (["hi", "hello"].includes(lower)) await sendText(from, "Please complete the bill form that was sent to you.");
-      else await sendText(from, "Please fill the bill form above. Type cancel to restart.");
+      if (["hi", "hello"].includes(lower)) {
+        clearSession(from);
+        await stepWelcome(from, getSession(from, contactName));
+      } else await sendText(from, "Please fill the bill form above. Type cancel to restart.");
       break;
     case "AMOUNT": {
       const amount = parseFloat(text.replace(/,/g, ""));
