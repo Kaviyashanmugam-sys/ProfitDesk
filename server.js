@@ -7,34 +7,23 @@ const path     = require("path");
 dotenv.config();
 const app = express();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MIDDLEWARE
-// ═══════════════════════════════════════════════════════════════════════════════
-
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/public",  express.static(path.join(__dirname, "public")));  // ✅ public folder
 
-// Request logging
 app.use((req, res, next) => {
   const logPaths = ["/", "/whatsapp", "/flow"];
   if (logPaths.some((p) => req.path === p || req.path.startsWith(p))) {
-    console.log(`\n📨 ${req.method} ${req.path}`); // ✅ Fixed: removed hardcoded /webhook prefix
+    console.log(`\n📨 ${req.method} ${req.path}`);
     console.log(`   Content-Type: ${req.headers["content-type"] || "-"}`);
     if (req.method === "POST") {
       console.log(`   Body Keys: ${Object.keys(req.body || {}).join(", ")}`);
-      if (req.path === "/webhook/flow" && req.body?.screen) {
-        console.log(`   Flow Screen: ${req.body.screen}`);
-      }
     }
   }
   next();
 });
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ROUTES
-// ═══════════════════════════════════════════════════════════════════════════════
 
 app.use("/api/auth",       require("./routes/authRoutes"));
 app.use("/api/companies",  require("./routes/companyRoutes"));
@@ -42,20 +31,11 @@ app.use("/api/projects",   require("./routes/projectRoutes"));
 app.use("/api/bills",      require("./routes/billRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/users",      require("./routes/userRoutes"));
+app.use("/webhook",        require("./routes/whatsappRoutes"));
 
-// ⭐ WhatsApp Routes
-// /webhook/whatsapp — chat messages
-// /webhook/flow     — WhatsApp Flow screen handler
-app.use("/webhook", require("./routes/whatsappRoutes"));
-
-// Health check
 app.get("/health", (req, res) => {
   res.json({ status: "✅ Server is running", time: new Date().toISOString() });
 });
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MONGODB
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/profitdesk";
 
@@ -72,10 +52,6 @@ mongoose
 
 mongoose.connection.on("disconnected", () => console.warn("⚠️  MongoDB disconnected"));
 mongoose.connection.on("error",        (err) => console.error("❌ MongoDB error:", err.message));
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SERVER
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 5000;
 

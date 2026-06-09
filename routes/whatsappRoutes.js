@@ -263,7 +263,7 @@ async function stepWelcome(from, session) {
         messaging_product: "whatsapp",
         to: from,
         type: "image",
-        image: { link: "https://profitdesk-6aoy.onrender.com/uploads/logo.png", caption: `Hi ${name}, Welcome to ProfitDesk!
+        image: { link: "https://profitdesk-6aoy.onrender.com/public/logo.png", caption: `Hi ${name}, Welcome to ProfitDesk!
 
 WE TRACK YOUR SITE, YOU TRACK YOUR GROWTH.` }
       }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
