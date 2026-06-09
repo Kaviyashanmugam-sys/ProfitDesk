@@ -257,6 +257,19 @@ async function stepWelcome(from, session) {
   session.companies = companies;
   const name = session.name || "there";
   if (FLOW_ID) {
+    // ✅ Send logo image first
+    try {
+      await axios.post(`${GRAPH_URL}/messages`, {
+        messaging_product: "whatsapp",
+        to: from,
+        type: "image",
+        image: { link: "https://profitdesk-6aoy.onrender.com/uploads/logo.png", caption: `Hi ${name}, Welcome to ProfitDesk!
+
+WE TRACK YOUR SITE, YOU TRACK YOUR GROWTH.` }
+      }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
+    } catch (imgErr) {
+      console.warn("[stepWelcome] logo send failed:", imgErr.message);
+    }
     await sendFlowMessage(from, phone91(from), session.rawPhone, name);
     session.step = "FLOW_SENT"; return;
   }
