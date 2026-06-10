@@ -12,7 +12,7 @@ const FLOW_ID          = process.env.FLOW_ID;
 const FLOW_PRIVATE_KEY = process.env.FLOW_PRIVATE_KEY;
 const GRAPH_URL        = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}`;
 const SESSION_TTL_MS   = 30 * 60 * 1000;
-const LOGO_URL         = "https://res.cloudinary.com/dxfphwvnf/image/upload/logo_hc2qsg";
+const LOGO_URL         = "https://res.cloudinary.com/dxfphwvnf/image/upload/f_jpg,q_auto/logo_hc2qsg";
 
 // ─── Phone helpers ────────────────────────────────────────────────────────────
 function phone10(raw) {
