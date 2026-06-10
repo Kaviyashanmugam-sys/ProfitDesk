@@ -410,6 +410,7 @@ async function handleMessage(from, message, contactName) {
           item:        JSON.stringify(pending.allFiles),
         }, from);
 
+        console.log(`[confirm_submit] submitResult type=${typeof submitResult} value=${JSON.stringify(submitResult)}`);
         if (submitResult && submitResult !== false) {
           const bill    = typeof submitResult === "object" ? submitResult : {};
           const billNo  = bill.ref_bill_no || "—";
