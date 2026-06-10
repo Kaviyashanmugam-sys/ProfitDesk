@@ -426,6 +426,7 @@ async function handleMessage(from, message, contactName) {
           });
 
           clearSession(from);
+
           await sendButtons(from,
             `✅ Bill Submitted Successfully!\n\n` +
             `Bill No: ${billNo}\n` +
@@ -437,6 +438,33 @@ async function handleMessage(from, message, contactName) {
             `Tap below to submit another bill.`,
             [{ id: "submit_another_bill", title: "Submit Another Bill" }]
           );
+
+          // ✅ Razorpay Payment Link
+          console.log(`[Razorpay] Creating payment link for bill ${billNo}`);
+          try {
+            const rzpKey    = process.env.RAZORPAY_KEY_ID;
+            const rzpSecret = process.env.RAZORPAY_KEY_SECRET;
+            const auth      = Buffer.from(`${rzpKey}:${rzpSecret}`).toString("base64");
+            const rzpRes    = await axios.post(
+              "https://api.razorpay.com/v1/payment_links",
+              {
+                amount:          Number(pending.amount) * 100,
+                currency:        "INR",
+                description:     `Bill ${billNo} - ${catName}`,
+                notify:          { sms: false, email: false },
+                reminder_enable: false,
+                notes:           { bill_no: billNo, category: catName, project: projName },
+              },
+              { headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" } }
+            );
+            const shortUrl = rzpRes.data.short_url;
+            console.log(`[Razorpay] ✅ Payment link: ${shortUrl}`);
+            await sendText(from, `💳 Pay Rs.${Number(pending.amount).toLocaleString("en-IN")} via Payment Link:\n${shortUrl}`);
+          } catch (rzpErr) {
+            console.warn("[Razorpay] ❌ Failed:", rzpErr.response?.data || rzpErr.message);
+            const upiNote = encodeURIComponent(`Bill ${billNo}`);
+            await sendText(from, `💳 Pay via UPI:\nupi://pay?pa=7402017768@kotakbank&pn=ProfitDesk&am=${Number(pending.amount)}&cu=INR&tn=${upiNote}`);
+          }
         } else {
           await sendText(from, "❌ Submission failed. Send hi to restart.");
           clearSession(from);
