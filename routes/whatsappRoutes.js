@@ -388,6 +388,7 @@ async function handleMessage(from, message, contactName) {
 
     // ── Confirm Bill Submit ──────────────────────────────────────────────────
     if (selectedId === "confirm_submit") {
+      console.log(`[confirm_submit] from=${from} | pending=${pendingBills.has(from)} | step=${session.step}`);
       const pending = pendingBills.get(from);
       if (!pending) { await sendText(from, "Session expired. Send hi to restart."); return; }
       pendingBills.delete(from);
@@ -447,6 +448,7 @@ async function handleMessage(from, message, contactName) {
     }
 
     // ── Cancel Bill ──────────────────────────────────────────────────────────
+    console.log(`[interactive] selectedId=${selectedId} | step=${session.step}`);
     if (selectedId === "cancel_submit") {
       pendingBills.delete(from);
       clearSession(from);
