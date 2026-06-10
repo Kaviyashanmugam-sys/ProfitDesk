@@ -225,7 +225,7 @@ async function stepWelcome(from, session) {
     console.warn("[stepWelcome] logo failed:", e.message);
   }
 
-  await sendFlow(from, phone91(from), session.rawPhone, `Hi ${name}, Welcome to ProfitDesk!\n\nClick below to create a new bill.`);
+  await sendFlow(from, phone91(from), session.rawPhone, "Click below to create a new bill.");
   session.step = "FLOW_SENT";
 }
 
