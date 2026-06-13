@@ -110,17 +110,14 @@ async function apiPostWithPhoneFallback(endpoint, baseBody, rawPhone) {
 async function checkUserAccess(rawPhone) {
   const p10 = phone10(rawPhone);
   const p91 = phone91(rawPhone);
-
-  // Try phone10 first, then phone91
   for (const phone of [p10, p91]) {
     try {
       const res = await axios.post(`${CUSTOMER_API}/check`, { phone }, {
         headers: { "Content-Type": "application/json" }, timeout: 15000,
       });
       const d = res.data;
-      console.log(`[check] phone=${phone} status=${d.status} code=${d.code} msg=${d.message}`);
+      console.log(`[check] phone=${phone} status=${d.status} msg=${d.message}`);
       if (String(d.status).toLowerCase() === "success") return { allowed: true, message: d.message };
-      // Return the exact error message from API
       return { allowed: false, message: d.message || "Access denied. Please contact your admin." };
     } catch (err) {
       console.error(`[check] error for ${phone}:`, err.message);
@@ -129,10 +126,11 @@ async function checkUserAccess(rawPhone) {
   return { allowed: false, message: "Unable to verify your account. Please try again later." };
 }
 
+// ─── Fetch dropdowns ──────────────────────────────────────────────────────────
 async function fetchBaseDropdowns(rawPhone) {
   const companyRes = await apiPostWithPhoneFallback("user-company-list", {}, rawPhone);
-  const company    = Array.isArray(companyRes) ? companyRes[0] : companyRes;
-  const companyId  = company ? Number(company.value ?? company.id) : 0;
+  const compArr    = Array.isArray(companyRes) ? companyRes : [];
+  const companyId  = compArr[0] ? Number(compArr[0].value ?? compArr[0].id) : 0;
   const [catRes, projRes] = await Promise.all([
     apiPostWithPhoneFallback("category-list",     {},                 rawPhone),
     apiPostWithPhoneFallback("user-project-list", { company_id: companyId }, rawPhone),
@@ -168,23 +166,6 @@ async function sendButtons(to, body, buttons) {
   }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
 }
 
-async function sendCTAButton(to, bodyText, buttonText, buttonUrl) {
-  try {
-    await axios.post(`${GRAPH_URL}/messages`, {
-      messaging_product: "whatsapp", to, type: "interactive",
-      interactive: {
-        type: "cta_url",
-        body: { text: bodyText },
-        action: { name: "cta_url", parameters: { display_text: buttonText, url: buttonUrl } },
-      },
-    }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
-  } catch (err) {
-    console.warn("[sendCTAButton] failed:", err.response?.data || err.message);
-    // Fallback to text
-    await sendText(to, `${bodyText}\n\n💳 Pay Now: ${buttonUrl}`);
-  }
-}
-
 async function sendFlow(to, flowToken, rawPhone, bodyText) {
   const { categories, projects } = await fetchBaseDropdowns(rawPhone);
   await axios.post(`${GRAPH_URL}/messages`, {
@@ -203,33 +184,12 @@ async function sendFlow(to, flowToken, rawPhone, bodyText) {
   }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
 }
 
-// ─── Razorpay payment link ────────────────────────────────────────────────────
-async function createPaymentLink(amount, billNo, catName, projName) {
-  try {
-    const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString("base64");
-    const res  = await axios.post("https://api.razorpay.com/v1/payment_links", {
-      amount:          Math.round(Number(amount) * 100),
-      currency:        "INR",
-      description:     `Bill ${billNo} - ${catName}`,
-      notify:          { sms: false, email: false },
-      reminder_enable: false,
-      notes:           { bill_no: billNo, category: catName, project: projName },
-    }, { headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" } });
-    return res.data.short_url;
-  } catch (err) {
-    console.warn("[Razorpay] Failed:", err.response?.data || err.message);
-    return null;
-  }
-}
-
-// ─── Welcome flow ─────────────────────────────────────────────────────────────
+// ─── Welcome ──────────────────────────────────────────────────────────────────
 async function stepWelcome(from, session) {
   const name = session.name || "there";
 
-  // ✅ Check API — validate user access
-  console.log(`[stepWelcome] checking access for ${from}`);
+  // Validate user
   const access = await checkUserAccess(from);
-
   if (!access.allowed) {
     console.log(`[stepWelcome] access denied: ${access.message}`);
     await sendText(from, `❌ ${access.message}`);
@@ -254,7 +214,7 @@ async function stepWelcome(from, session) {
     session.step = "FLOW_SENT";
     console.log("[stepWelcome] flow sent ✅");
   } catch (e) {
-    console.error("[stepWelcome] flow send failed:", e.message);
+    console.error("[stepWelcome] flow failed:", e.message);
     await sendText(from, "Sorry, something went wrong. Please try again.");
     clearSession(from);
   }
@@ -272,7 +232,6 @@ async function handleMessage(from, message, contactName) {
     // Submit Another Bill
     if (selectedId === "submit_another_bill") {
       clearSession(from); pendingBills.delete(from);
-      // Re-check access before opening new form
       const access = await checkUserAccess(from);
       if (!access.allowed) {
         await sendText(from, `❌ ${access.message}`);
@@ -391,7 +350,7 @@ router.post("/flow", async (req, res) => {
       return reply({ screen: "BILL_FORM", data: { categories, projects, error_message: "" } });
     }
 
-    // BILL_FORM → SELECT_VENDOR (fetch vendors filtered by selected category)
+    // BILL_FORM → SELECT_VENDOR
     if (screen === "BILL_FORM") {
       const { category, project, amount, remarks } = data;
       if (!category || !project || !amount) return reply({ screen: "BILL_FORM", data: { error_message: "Category, Project and Amount are required." } });
@@ -403,7 +362,6 @@ router.post("/flow", async (req, res) => {
       const vendors    = await fetchVendorsByCategory(rawPhone, companyId, Number(category));
 
       console.log(`[BILL_FORM] category=${category} vendors=${vendors.length}`);
-
       return reply({
         screen: "SELECT_VENDOR",
         data: { error_message: "", vendors, category, project, amount: String(amount), remarks: remarks || "" },
@@ -428,7 +386,7 @@ router.post("/flow", async (req, res) => {
       });
     }
 
-    // ADD_DOCUMENTS → Summary with Pay Now CTA button
+    // ADD_DOCUMENTS → Bill Summary (WhatsApp chat)
     if (screen === "ADD_DOCUMENTS") {
       const { category, project, vendor, amount, remarks, photos, documents } = data;
       const allFiles = [...(Array.isArray(photos) ? photos : []), ...(Array.isArray(documents) ? documents : [])];
@@ -447,34 +405,21 @@ router.post("/flow", async (req, res) => {
       const session = getSession(userPhone);
       session.step  = "CONFIRMING";
 
-      // Try Razorpay payment link
-      const payLink = await createPaymentLink(amount, "Pending", catName, projName);
-
-      const summaryText =
-        `📋 Bill Summary\n\n` +
-        `Category: ${catName}\n` +
-        `Project:  ${projName}\n` +
-        `Vendor:   ${vendName}\n` +
-        `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
-        `Remarks:  ${remarks || "-"}\n` +
-        `Files:    ${allFiles.length} file(s)\n\n` +
-        `Please confirm to submit.`;
-
       try {
-        if (payLink) {
-          // Send Pay Now CTA button first
-          await sendCTAButton(userPhone, summaryText, "💳 Pay Now (optional)", payLink);
-          // Then confirm/cancel
-          await sendButtons(userPhone, "Ready to submit?", [
+        await sendButtons(userPhone,
+          `📋 Bill Summary\n\n` +
+          `Category: ${catName}\n` +
+          `Project:  ${projName}\n` +
+          `Vendor:   ${vendName}\n` +
+          `Amount:   Rs.${Number(amount).toLocaleString("en-IN")}\n` +
+          `Remarks:  ${remarks || "-"}\n` +
+          `Files:    ${allFiles.length} file(s)\n\n` +
+          `Please confirm to submit.`,
+          [
             { id: "confirm_submit", title: "✅ Confirm & Submit" },
             { id: "cancel_submit",  title: "❌ Cancel" },
-          ]);
-        } else {
-          await sendButtons(userPhone, summaryText, [
-            { id: "confirm_submit", title: "✅ Confirm & Submit" },
-            { id: "cancel_submit",  title: "❌ Cancel" },
-          ]);
-        }
+          ]
+        );
       } catch (e) { console.warn("[Flow] Summary failed:", e.message); }
 
       return reply({ screen: "SUCCESS", data: {} });
